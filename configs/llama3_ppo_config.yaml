@@ -1,0 +1,49 @@
+# Configuration for Llama 3-8B on A100 40GB
+model:
+  name: "meta-llama/Meta-Llama-3-8B"
+  hidden_size: 4096
+  reasoning_dim: 256  # Reduced for memory
+  max_latent_steps: 6  # Reduced for memory
+  gradient_checkpointing: true
+  
+ppo:
+  clip_epsilon: 0.2
+  value_coef: 0.5
+  entropy_coef: 0.01
+  max_grad_norm: 0.5
+  ppo_epochs: 4
+  gamma: 0.99
+  gae_lambda: 0.95
+  rollout_buffer_size: 256  # Smaller buffer for memory
+
+training:
+  batch_size: 2  # Small batch for A100 40GB
+  gradient_accumulation_steps: 8  # Effective batch = 16
+  learning_rate_base: 1e-5  # For Llama base model
+  learning_rate_navigator: 3e-4  # For navigator
+  num_epochs: 10
+  warmup_steps: 100
+  save_steps: 500
+  eval_steps: 100
+  logging_steps: 10
+  
+  # Mixed precision
+  fp16: false
+  bf16: true  # Better for A100
+  
+  # Memory optimizations
+  gradient_checkpointing: true
+  optim: "adamw_torch"
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+  
+data:
+  max_length: 512  # Reduced for memory
+  num_workers: 2
+  
+debug:
+  enable: true
+  log_trajectories: true
+  check_gradients: true
+  monitor_memory: true
+  wandb_project: "coconut-llama3-ppo"
