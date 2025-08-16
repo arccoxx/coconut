@@ -60,7 +60,7 @@ class PPOTrainer:
         self.model.train()
         
         # Collect trajectories with mixed precision
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda', ):
             outputs = self.model(
                 input_ids=batch['input_ids'].to(self.device),
                 attention_mask=batch['attention_mask'].to(self.device),
@@ -150,7 +150,7 @@ class PPOTrainer:
                 batch_returns = returns[batch_indices]
                 
                 # Get current policy outputs
-                with torch.cuda.amp.autocast():
+                with torch.amp.autocast('cuda', ):
                     # Recompute from states
                     nav_outputs = self.model.navigator.navigate(
                         batch_states,
