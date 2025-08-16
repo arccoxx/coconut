@@ -1,6 +1,6 @@
 # COCONUT PPO Implementation for Llama 3-8B
 
-This repository contains an implementation of COCONUT (Chain of Continuous Thought) with PPO-based adaptive reasoning, optimized for Llama 3-8B on A100 40GB GPUs.
+This repository contains an implementation of COCONUT (Chain of Continuous Thought) with PPO-based adaptive reasoning, optimized for Llama 3-8B on (1) A100 40GB GPU.
 
 ## 📋 Overview
 
