@@ -1,5 +1,5 @@
 """
-Enhanced COCONUT with PPO - Fixed device handling
+Enhanced COCONUT with PPO - Fixed tensor shape handling
 """
 
 import torch
@@ -12,18 +12,20 @@ import logging
 logger = logging.getLogger(__name__)
 
 class ContinuousReasoningNavigator(nn.Module):
-    """Memory-efficient continuous reasoning navigator"""
+    """Memory-efficient continuous reasoning navigator with dtype support"""
     def __init__(
         self,
         hidden_size: int,
         reasoning_dim: int = 256,
         memory_size: int = 500,
-        device: Optional[torch.device] = None  # Add device parameter
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None
     ):
         super().__init__()
         self.hidden_size = hidden_size
         self.reasoning_dim = reasoning_dim
         self.device = device
+        self.dtype = dtype if dtype is not None else torch.float32
         
         # Efficient projection layers
         self.state_projection = nn.Sequential(
@@ -48,14 +50,26 @@ class ContinuousReasoningNavigator(nn.Module):
         self.register_buffer('memory_values', torch.zeros(memory_size))
         self.memory_ptr = 0
         
-        # Move to device if specified
+        # Move to device and dtype if specified
         if device:
             self.to(device)
+        if dtype:
+            self.to(dtype)
     
     def navigate(self, state: torch.Tensor, return_policy_info: bool = True) -> Dict[str, torch.Tensor]:
-        """Navigate through reasoning space"""
-        # Ensure state is on the same device as the module
+        """Navigate through reasoning space - handles both single and batch inputs"""
+        # Ensure state is on the same device and dtype
         state = state.to(self.continue_head.weight.device)
+        state = state.to(self.continue_head.weight.dtype)
+        
+        # Handle both single and batch inputs
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+            single_input = True
+        else:
+            single_input = False
+        
+        batch_size = state.shape[0]
         
         # Project to reasoning space
         reasoning_state = self.state_projection(state)
@@ -82,18 +96,25 @@ class ContinuousReasoningNavigator(nn.Module):
         # Generate thought
         latent_thought = self.thought_projection(next_position)
         
+        # For batch processing, we need to handle stop condition differently
+        if single_input:
+            stop_condition = continue_action.item() == 1
+        else:
+            # For batch, return tensor of stop conditions
+            stop_condition = (continue_action == 1)
+        
         result = {
-            'latent_thought': latent_thought,
-            'stop': continue_action.item() == 1,
-            'position': next_position
+            'latent_thought': latent_thought.squeeze(0) if single_input else latent_thought,
+            'stop': stop_condition,
+            'position': next_position.squeeze(0) if single_input else next_position
         }
         
         if return_policy_info:
             result.update({
-                'action': continue_action,
-                'log_prob': continue_dist.log_prob(continue_action),
-                'value': value.squeeze(),
-                'entropy': continue_dist.entropy()
+                'action': continue_action.squeeze(0) if single_input else continue_action,
+                'log_prob': continue_dist.log_prob(continue_action).squeeze(0) if single_input else continue_dist.log_prob(continue_action),
+                'value': value.squeeze() if single_input else value.squeeze(-1),
+                'entropy': continue_dist.entropy().squeeze(0) if single_input else continue_dist.entropy()
             })
         
         return result
@@ -124,14 +145,16 @@ class CoconutPPO(nn.Module):
         self.end_latent_id = end_latent_id
         self.eos_token_id = eos_token_id
         
-        # Get device from base model
+        # Get device and dtype from base model
         device = next(base_model.parameters()).device
+        dtype = next(base_model.parameters()).dtype
         
-        # Reasoning navigator - create on the same device as base model
+        # Reasoning navigator - create with same device and dtype as base model
         self.navigator = ContinuousReasoningNavigator(
             hidden_size=hidden_size,
             reasoning_dim=reasoning_dim,
-            device=device
+            device=device,
+            dtype=dtype
         )
         
         # Enable gradient checkpointing
@@ -145,74 +168,111 @@ class CoconutPPO(nn.Module):
         labels: Optional[torch.Tensor] = None,
         return_trajectory: bool = True
     ) -> Dict[str, torch.Tensor]:
-        """Forward pass with PPO trajectory collection"""
+        """Forward pass with PPO trajectory collection - handles batches properly"""
         batch_size = input_ids.shape[0]
         device = input_ids.device
         
         # Get initial embeddings
         inputs_embeds = self.base_model.get_input_embeddings()(input_ids)
         
-        # Initialize trajectory storage
-        trajectory = {
-            'states': [],
-            'actions': [],
-            'log_probs': [],
-            'values': [],
-            'rewards': [],
-            'latent_embeds': []
-        }
+        # Initialize trajectory storage for each batch item
+        batch_trajectories = []
+        batch_latent_sequences = []
         
-        # Get initial hidden state
-        with torch.no_grad():
-            outputs = self.base_model(
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                output_hidden_states=True,
-                use_cache=False
-            )
+        # Process each item in batch separately for trajectory collection
+        for b in range(batch_size):
+            trajectory = {
+                'states': [],
+                'actions': [],
+                'log_probs': [],
+                'values': [],
+                'latent_embeds': []
+            }
+            
+            # Get initial hidden state for this batch item
+            with torch.no_grad():
+                outputs = self.base_model(
+                    inputs_embeds=inputs_embeds[b:b+1],
+                    attention_mask=attention_mask[b:b+1] if attention_mask is not None else None,
+                    output_hidden_states=True,
+                    use_cache=False
+                )
+            
+            current_state = outputs.hidden_states[-1].mean(dim=1).squeeze(0)
+            
+            # Navigate through reasoning space
+            latent_sequence = []
+            for step in range(self.max_latent_steps):
+                nav_output = self.navigator.navigate(current_state, return_policy_info=True)
+                
+                # Store trajectory info
+                if return_trajectory:
+                    trajectory['states'].append(current_state.detach())
+                    trajectory['actions'].append(nav_output['action'])
+                    trajectory['log_probs'].append(nav_output['log_prob'])
+                    trajectory['values'].append(nav_output['value'])
+                
+                # Check stopping condition (now handles both single and batch)
+                if isinstance(nav_output['stop'], bool):
+                    should_stop = nav_output['stop']
+                else:
+                    should_stop = nav_output['stop'].item() if nav_output['stop'].numel() == 1 else False
+                
+                if should_stop:
+                    break
+                
+                # Generate latent thought
+                latent_thought = nav_output['latent_thought']
+                latent_sequence.append(latent_thought)
+                
+                if return_trajectory:
+                    trajectory['latent_embeds'].append(latent_thought.detach())
+                
+                # Update state
+                current_state = latent_thought
+            
+            batch_trajectories.append(trajectory)
+            batch_latent_sequences.append(latent_sequence)
         
-        current_state = outputs.hidden_states[-1].mean(dim=1)
+        # Process full batch through model with latent thoughts
+        max_latent_len = max(len(seq) for seq in batch_latent_sequences) if batch_latent_sequences else 0
         
-        # Navigate through reasoning space
-        latent_sequence = []
-        for step in range(self.max_latent_steps):
-            nav_output = self.navigator.navigate(current_state, return_policy_info=True)
+        if max_latent_len > 0:
+            # Pad latent sequences to same length - FIX: ensure consistent dimensions
+            padded_latent_sequences = []
+            for seq in batch_latent_sequences:
+                if len(seq) == 0:
+                    # Create padding with correct shape (no latent thoughts for this item)
+                    # Use a dummy tensor with the same shape as a latent thought would have
+                    dummy_thought = torch.zeros(self.hidden_size, device=device, dtype=inputs_embeds.dtype)
+                    padding = [dummy_thought for _ in range(max_latent_len)]
+                    padded_seq = padding
+                elif len(seq) < max_latent_len:
+                    # Pad with zeros of the same shape as existing thoughts
+                    padding = [torch.zeros_like(seq[0]) for _ in range(max_latent_len - len(seq))]
+                    padded_seq = seq + padding
+                else:
+                    padded_seq = seq
+                
+                # Ensure all tensors in padded_seq have the same shape
+                # Stack them to create shape [seq_len, hidden_size]
+                stacked_seq = torch.stack(padded_seq, dim=0)
+                padded_latent_sequences.append(stacked_seq)
             
-            # Store trajectory info
-            if return_trajectory:
-                trajectory['states'].append(current_state.detach())
-                trajectory['actions'].append(nav_output['action'])
-                trajectory['log_probs'].append(nav_output['log_prob'])
-                trajectory['values'].append(nav_output['value'])
+            # Stack for batch processing - shape will be [batch_size, seq_len, hidden_size]
+            latent_embeds = torch.stack(padded_latent_sequences, dim=0)
             
-            # Check stopping condition
-            if nav_output['stop']:
-                break
-            
-            # Generate latent thought
-            latent_thought = nav_output['latent_thought']
-            latent_sequence.append(latent_thought)
-            
-            if return_trajectory:
-                trajectory['latent_embeds'].append(latent_thought.detach())
-            
-            # Update state
-            current_state = latent_thought
-        
-        # Final forward pass
-        if latent_sequence:
-            # Insert latent thoughts
-            latent_embeds = torch.stack(latent_sequence, dim=1)
+            # Insert latent thoughts into sequence
             enhanced_embeds = torch.cat([
-                inputs_embeds[:, :1, :],
-                latent_embeds,
-                inputs_embeds[:, 1:, :]
+                inputs_embeds[:, :1, :],  # Start token
+                latent_embeds,             # Latent thoughts
+                inputs_embeds[:, 1:, :]    # Rest of sequence
             ], dim=1)
             
             # Update attention mask
             if attention_mask is not None:
                 latent_attention = torch.ones(
-                    batch_size, len(latent_sequence),
+                    batch_size, max_latent_len,
                     dtype=attention_mask.dtype,
                     device=device
                 )
@@ -243,6 +303,9 @@ class CoconutPPO(nn.Module):
         }
         
         if return_trajectory:
-            result['trajectory'] = trajectory
+            # Return first trajectory or empty one if no trajectories
+            result['trajectory'] = batch_trajectories[0] if batch_trajectories else {
+                'states': [], 'actions': [], 'log_probs': [], 'values': [], 'latent_embeds': []
+            }
             
         return result
