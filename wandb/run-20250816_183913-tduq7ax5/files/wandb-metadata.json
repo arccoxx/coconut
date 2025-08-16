@@ -1,0 +1,39 @@
+{
+  "os": "Linux-6.1.123+-x86_64-with-glibc2.35",
+  "python": "CPython 3.11.13",
+  "startedAt": "2025-08-16T18:39:13.478824Z",
+  "program": "coconut-memory-navigator-upgrade.ipynb",
+  "git": {
+    "remote": "https://github.com/arccoxx/coconut.git",
+    "commit": "379e784b19642b0c31f72e064e07d174a29b2b21"
+  },
+  "email": "arcco96@gmail.com",
+  "root": "/content/coconut",
+  "host": "17c716cd53dd",
+  "executable": "/usr/bin/python3",
+  "colab": "https://colab.research.google.com/notebook#fileId=1Ek6VNHdzAIzuPg0Go_5HBgoD1mRpe699",
+  "cpu_count": 6,
+  "cpu_count_logical": 12,
+  "gpu": "NVIDIA A100-SXM4-40GB",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "253055008768",
+      "used": "72250109952"
+    }
+  },
+  "memory": {
+    "total": "89631739904"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA A100-SXM4-40GB",
+      "memoryTotal": "42949672960",
+      "cudaCores": 6912,
+      "architecture": "Ampere",
+      "uuid": "GPU-7af8976f-dab9-679b-82da-07f87fa7aa43"
+    }
+  ],
+  "cudaVersion": "12.4",
+  "writerId": "3b5acf0njo1ebm3pi3qpx01syrcizehu"
+}
