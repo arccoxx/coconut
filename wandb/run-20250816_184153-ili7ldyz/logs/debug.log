@@ -1,0 +1,21 @@
+2025-08-16 18:41:53,271 INFO    MainThread:12648 [wandb_setup.py:_flush():80] Current SDK version is 0.21.1
+2025-08-16 18:41:53,271 INFO    MainThread:12648 [wandb_setup.py:_flush():80] Configure stats pid to 12648
+2025-08-16 18:41:53,271 INFO    MainThread:12648 [wandb_setup.py:_flush():80] Loading settings from /root/.config/wandb/settings
+2025-08-16 18:41:53,271 INFO    MainThread:12648 [wandb_setup.py:_flush():80] Loading settings from /content/coconut/wandb/settings
+2025-08-16 18:41:53,271 INFO    MainThread:12648 [wandb_setup.py:_flush():80] Loading settings from environment variables
+2025-08-16 18:41:53,271 INFO    MainThread:12648 [wandb_init.py:setup_run_log_directory():703] Logging user logs to /content/coconut/wandb/run-20250816_184153-ili7ldyz/logs/debug.log
+2025-08-16 18:41:53,272 INFO    MainThread:12648 [wandb_init.py:setup_run_log_directory():704] Logging internal logs to /content/coconut/wandb/run-20250816_184153-ili7ldyz/logs/debug-internal.log
+2025-08-16 18:41:53,272 INFO    MainThread:12648 [wandb_init.py:init():830] calling init triggers
+2025-08-16 18:41:53,272 INFO    MainThread:12648 [wandb_init.py:init():835] wandb.init called with sweep_config: {}
+config: {'model_name': 'meta-llama/Meta-Llama-3-8B-Instruct', 'batch_size': 2, 'lr_base': 1e-05, 'lr_navigator': 0.0003, 'clip_epsilon': 0.2, 'value_coef': 0.5, 'entropy_coef': 0.01, 'gamma': 0.99, 'gae_lambda': 0.95, 'ppo_epochs': 4, 'rollout_buffer_size': 100, 'num_epochs': 5, '_wandb': {}}
+2025-08-16 18:41:53,272 INFO    MainThread:12648 [wandb_init.py:init():871] starting backend
+2025-08-16 18:41:53,276 INFO    MainThread:12648 [wandb_init.py:init():874] sending inform_init request
+2025-08-16 18:41:53,278 INFO    MainThread:12648 [wandb_init.py:init():882] backend started and connected
+2025-08-16 18:41:53,280 INFO    MainThread:12648 [wandb_init.py:init():953] updated telemetry
+2025-08-16 18:41:53,285 INFO    MainThread:12648 [wandb_init.py:init():977] communicating run to backend with 90.0 second timeout
+2025-08-16 18:41:53,457 INFO    MainThread:12648 [wandb_init.py:init():1029] starting run threads in backend
+2025-08-16 18:41:53,855 INFO    MainThread:12648 [wandb_run.py:_console_start():2494] atexit reg
+2025-08-16 18:41:53,855 INFO    MainThread:12648 [wandb_run.py:_redirect():2342] redirect: wrap_raw
+2025-08-16 18:41:53,855 INFO    MainThread:12648 [wandb_run.py:_redirect():2411] Wrapping output streams.
+2025-08-16 18:41:53,855 INFO    MainThread:12648 [wandb_run.py:_redirect():2434] Redirects installed.
+2025-08-16 18:41:53,857 INFO    MainThread:12648 [wandb_init.py:init():1075] run started, returning control to user process

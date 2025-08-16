@@ -27,3 +27,15 @@ config: {'model': 'Llama-3-8B', 'reasoning_dim': 256, 'max_latent_steps': 4, 'ba
 2025-08-16 18:40:15,428 INFO    MainThread:6572 [wandb_init.py:_post_run_cell_hook():592] [no run ID] resuming backend
 2025-08-16 18:41:01,381 INFO    MainThread:6572 [jupyter.py:save_ipynb():404] [no run ID] not saving jupyter notebook
 2025-08-16 18:41:01,381 INFO    MainThread:6572 [wandb_init.py:_pre_run_cell_hook():581] [no run ID] pausing backend
+2025-08-16 18:41:02,088 INFO    MainThread:6572 [wandb_init.py:_post_run_cell_hook():592] [no run ID] resuming backend
+2025-08-16 18:41:42,395 INFO    MainThread:6572 [jupyter.py:save_ipynb():404] [no run ID] not saving jupyter notebook
+2025-08-16 18:41:42,395 INFO    MainThread:6572 [wandb_init.py:_pre_run_cell_hook():581] [no run ID] pausing backend
+2025-08-16 18:42:04,864 INFO    MainThread:6572 [wandb_init.py:_post_run_cell_hook():592] [no run ID] resuming backend
+2025-08-16 18:48:23,502 INFO    MainThread:6572 [jupyter.py:save_ipynb():404] [no run ID] not saving jupyter notebook
+2025-08-16 18:48:23,502 INFO    MainThread:6572 [wandb_init.py:_pre_run_cell_hook():581] [no run ID] pausing backend
+2025-08-16 18:48:23,507 INFO    MainThread:6572 [wandb_init.py:_post_run_cell_hook():592] [no run ID] resuming backend
+2025-08-16 18:49:14,798 INFO    MainThread:6572 [jupyter.py:save_ipynb():404] [no run ID] not saving jupyter notebook
+2025-08-16 18:49:14,799 INFO    MainThread:6572 [wandb_init.py:_pre_run_cell_hook():581] [no run ID] pausing backend
+2025-08-16 18:49:14,801 INFO    MainThread:6572 [wandb_init.py:_post_run_cell_hook():592] [no run ID] resuming backend
+2025-08-16 18:49:22,804 INFO    MainThread:6572 [jupyter.py:save_ipynb():404] [no run ID] not saving jupyter notebook
+2025-08-16 18:49:22,804 INFO    MainThread:6572 [wandb_init.py:_pre_run_cell_hook():581] [no run ID] pausing backend

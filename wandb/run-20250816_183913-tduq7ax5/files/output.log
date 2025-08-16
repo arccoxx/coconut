@@ -1,1 +1,87 @@
 Writing train_full.py
+=== Git Status ===
+On branch main
+Your branch is up to date with 'origin/main'.
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	prepare_dataset.py
+	train_full.py
+	wandb/
+
+nothing added to commit but untracked files present (use "git add" to track)
+
+
+=== Adding files ===
+
+
+=== Committing ===
+[main 217aa1e] Update COCONUT PPO: Fix device placement, add Llama3 support, integrate continuous reasoning navigator
+ 12 files changed, 1204 insertions(+)
+ create mode 100644 prepare_dataset.py
+ create mode 100644 train_full.py
+ create mode 120000 wandb/debug-internal.log
+ create mode 120000 wandb/debug.log
+ create mode 120000 wandb/latest-run
+ create mode 100644 wandb/run-20250816_183913-tduq7ax5/files/output.log
+ create mode 100644 wandb/run-20250816_183913-tduq7ax5/files/requirements.txt
+ create mode 100644 wandb/run-20250816_183913-tduq7ax5/files/wandb-metadata.json
+ create mode 120000 wandb/run-20250816_183913-tduq7ax5/logs/debug-core.log
+ create mode 100644 wandb/run-20250816_183913-tduq7ax5/logs/debug-internal.log
+ create mode 100644 wandb/run-20250816_183913-tduq7ax5/logs/debug.log
+ create mode 100644 wandb/run-20250816_183913-tduq7ax5/run-tduq7ax5.wandb
+
+
+=== Pushing to GitHub ===
+
+✅ Successfully pushed to GitHub!
+2025-08-16 18:41:48.102665: I tensorflow/core/util/port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+2025-08-16 18:41:48.122538: E external/local_xla/xla/stream_executor/cuda/cuda_fft.cc:467] Unable to register cuFFT factory: Attempting to register factory for plugin cuFFT when one has already been registered
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+E0000 00:00:1755369708.144402   12648 cuda_dnn.cc:8579] Unable to register cuDNN factory: Attempting to register factory for plugin cuDNN when one has already been registered
+E0000 00:00:1755369708.150938   12648 cuda_blas.cc:1407] Unable to register cuBLAS factory: Attempting to register factory for plugin cuBLAS when one has already been registered
+W0000 00:00:1755369708.168022   12648 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1755369708.168054   12648 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1755369708.168058   12648 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+W0000 00:00:1755369708.168061   12648 computation_placer.cc:177] computation placer already registered. Please check linkage and avoid linking the same target more than once.
+2025-08-16 18:41:48.173205: I tensorflow/core/platform/cpu_feature_guard.cc:210] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX512F AVX512_VNNI FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+[34m[1mwandb[0m: Currently logged in as: [33marcco96[0m to [32mhttps://api.wandb.ai[0m. Use [1m`wandb login --relogin`[0m to force relogin
+[34m[1mwandb[0m: Tracking run with wandb version 0.21.1
+[34m[1mwandb[0m: Run data is saved locally in [35m[1m/content/coconut/wandb/run-20250816_184153-ili7ldyz[0m
+[34m[1mwandb[0m: Run [1m`wandb offline`[0m to turn off syncing.
+[34m[1mwandb[0m: Syncing run [33mclear-firebrand-2[0m
+[34m[1mwandb[0m: ⭐️ View project at [34m[4mhttps://wandb.ai/arcco96/coconut-llama3-ppo[0m
+[34m[1mwandb[0m: 🚀 View run at [34m[4mhttps://wandb.ai/arcco96/coconut-llama3-ppo/runs/ili7ldyz[0m
+Loading checkpoint shards: 100% 4/4 [00:04<00:00,  1.14s/it]
+The new embeddings will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
+The new lm_head weights will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
+Loading GSM8K dataset...
+Loaded 7473 training examples, 1319 test examples
+Epoch 0:   0% 0/500 [00:00<?, ?it/s]/usr/local/lib/python3.11/dist-packages/torch/utils/checkpoint.py:87: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+Epoch 0:   0% 0/500 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/content/coconut/train_full.py", line 352, in <module>
+    main()
+  File "/content/coconut/train_full.py", line 329, in main
+    epoch_metrics = trainer.train_epoch(train_loader, epoch)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/coconut/train_full.py", line 199, in train_epoch
+    outputs = self.model(
+              ^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/coconut/coconut_ppo.py", line 179, in forward
+    nav_output = self.navigator.navigate(current_state, return_policy_info=True)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/coconut/coconut_ppo.py", line 87, in navigate
+    'stop': continue_action.item() == 1,
+            ^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: a Tensor with 2 elements cannot be converted to Scalar
+Writing coconut_ppo_fixed_batch.py
+Writing update_github.sh

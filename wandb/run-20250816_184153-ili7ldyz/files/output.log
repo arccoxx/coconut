@@ -1,0 +1,30 @@
+Loading checkpoint shards: 100% 4/4 [00:04<00:00,  1.14s/it]
+The new embeddings will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
+The new lm_head weights will be initialized from a multivariate normal distribution that has old embeddings' mean and covariance. As described in this article: https://nlp.stanford.edu/~johnhew/vocab-expansion.html. To disable this, use `mean_resizing=False`
+Loading GSM8K dataset...
+Loaded 7473 training examples, 1319 test examples
+Epoch 0:   0% 0/500 [00:00<?, ?it/s]/usr/local/lib/python3.11/dist-packages/torch/utils/checkpoint.py:87: UserWarning: None of the inputs have requires_grad=True. Gradients will be None
+  warnings.warn(
+Epoch 0:   0% 0/500 [00:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/content/coconut/train_full.py", line 352, in <module>
+    main()
+  File "/content/coconut/train_full.py", line 329, in main
+    epoch_metrics = trainer.train_epoch(train_loader, epoch)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/coconut/train_full.py", line 199, in train_epoch
+    outputs = self.model(
+              ^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/nn/modules/module.py", line 1739, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.11/dist-packages/torch/nn/modules/module.py", line 1750, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/coconut/coconut_ppo.py", line 179, in forward
+    nav_output = self.navigator.navigate(current_state, return_policy_info=True)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/content/coconut/coconut_ppo.py", line 87, in navigate
+    'stop': continue_action.item() == 1,
+            ^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: a Tensor with 2 elements cannot be converted to Scalar
