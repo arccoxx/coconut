@@ -1,5 +1,5 @@
 """
-Enhanced COCONUT with PPO - Fixed tensor shape handling
+Enhanced COCONUT with PPO - Fixed to handle training without labels mismatch
 """
 
 import torch
@@ -237,24 +237,41 @@ class CoconutPPO(nn.Module):
         # Process full batch through model with latent thoughts
         max_latent_len = max(len(seq) for seq in batch_latent_sequences) if batch_latent_sequences else 0
         
+        if max_latent_len > 0 and labels is not None:
+            # When we have labels, we need to adjust them for the latent thoughts
+            # Insert -100 (ignore index) for latent thought positions
+            batch_size, seq_len = labels.shape
+            
+            # Create new labels with space for latent thoughts
+            new_labels = torch.full(
+                (batch_size, seq_len + max_latent_len),
+                -100,  # Ignore index for cross entropy
+                dtype=labels.dtype,
+                device=labels.device
+            )
+            
+            # Copy original labels to correct positions
+            new_labels[:, 0] = labels[:, 0]  # First token
+            new_labels[:, max_latent_len + 1:] = labels[:, 1:]  # Rest after latent
+            
+            labels = new_labels
+        
         if max_latent_len > 0:
-            # Pad latent sequences to same length - FIX: ensure consistent dimensions
+            # Pad latent sequences to same length
             padded_latent_sequences = []
             for seq in batch_latent_sequences:
                 if len(seq) == 0:
-                    # Create padding with correct shape (no latent thoughts for this item)
-                    # Use a dummy tensor with the same shape as a latent thought would have
+                    # Create padding with correct shape
                     dummy_thought = torch.zeros(self.hidden_size, device=device, dtype=inputs_embeds.dtype)
                     padding = [dummy_thought for _ in range(max_latent_len)]
                     padded_seq = padding
                 elif len(seq) < max_latent_len:
-                    # Pad with zeros of the same shape as existing thoughts
+                    # Pad with zeros of the same shape
                     padding = [torch.zeros_like(seq[0]) for _ in range(max_latent_len - len(seq))]
                     padded_seq = seq + padding
                 else:
                     padded_seq = seq
                 
-                # Ensure all tensors in padded_seq have the same shape
                 # Stack them to create shape [seq_len, hidden_size]
                 stacked_seq = torch.stack(padded_seq, dim=0)
                 padded_latent_sequences.append(stacked_seq)
@@ -291,6 +308,7 @@ class CoconutPPO(nn.Module):
                 labels=labels
             )
         else:
+            # No latent thoughts, use original inputs
             outputs = self.base_model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
