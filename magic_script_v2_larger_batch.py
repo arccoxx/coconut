@@ -1,19 +1,29 @@
 """
-COCONUT Training v5 - FULL MODEL Training (All Layers Unfrozen)
+COCONUT Training v5 - FULL MODEL Training with Smart Auto-Scaling
 Key features:
 1. Training entire unfrozen network (all 32 layers)
-2. Optimized for 94GB GPU with larger batch sizes
-3. Reduce navigator bias (was too strong)
-4. Add stopping rewards
-5. Variable trajectory targets
-6. Better reward shaping for different lengths
-7. Stochastic trajectory sampling
-8. Adjusted learning rates for batch size scaling
+2. Smart auto-scaling for optimal GPU utilization
+3. Aggressive batch size adjustment based on actual memory usage
+4. Dynamic learning rate scaling based on batch size
+5. Reduce navigator bias (was too strong)
+6. Add stopping rewards
+7. Variable trajectory targets
+8. Better reward shaping for different lengths
+9. Stochastic trajectory sampling
+
+Auto-Scaling Strategy:
+- Starts with conservative batch_size=8
+- Tests actual memory usage with single sample
+- Auto-scales aggressively if utilization < 40%
+- Moderate scaling if utilization 40-60%
+- Conservative scaling if utilization 60-70%
+- Auto-reduces if utilization > 92%
 
 Memory Usage Estimates (bfloat16):
-- Batch size 1: ~35-40GB
-- Batch size 4: ~50-60GB (recommended for 94GB GPU)
-- Batch size 8: ~70-80GB
+- Batch size 4: ~35-40GB (37-42% utilization)
+- Batch size 8: ~65-70GB (69-74% utilization)
+- Batch size 10: ~78-82GB (83-87% utilization) 
+- Batch size 12: ~85-90GB (90-96% utilization)
 """
 
 import torch
@@ -27,7 +37,7 @@ import gc
 import random
 import re
 from typing import Dict, List, Optional, Tuple
-from collections import defaultdict
+from collections import defaultdict, Counter
 # Fixed import statement
 if 'get_ipython' in globals():
     from tqdm.notebook import tqdm
@@ -545,16 +555,44 @@ def compute_reward_v2(trajectory_length, correct, natural_stop, target_length=4)
 # ============================================================
 
 def train():
-    # Configuration
+    # Configuration for 94GB GPU with auto-scaling
     num_epochs = 5
-    batch_size = 1
-    gradient_accumulation_steps = 8
+    batch_size = 8  # Starting conservative, will auto-scale based on actual usage
+    target_effective_batch = 32  # Target effective batch size
+    gradient_accumulation_steps = 4  # Will be adjusted based on final batch_size
+    max_batch_size = 16  # Maximum we'll auto-scale to
+    min_batch_size = 4  # Minimum fallback size
     max_length = 512
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     
-    # Learning rates (adjusted for full model training)
-    learning_rate = 5e-6  # Reduced from 1e-5 for stability with full model
-    navigator_lr = 1e-5   # Reduced from 1.5e-5
+    # Track OOM events and successful batches
+    oom_count = 0
+    total_successful_batches = 0
+    
+    # Base learning rates (will be scaled based on actual batch size)
+    base_learning_rate = 5e-6
+    base_navigator_lr = 1e-5
+    
+    # Memory monitoring
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        initial_memory = torch.cuda.memory_allocated() / 1024**3
+        print(f"📊 Initial GPU memory: {initial_memory:.1f}GB")
+    
+    # Auto-Scaling Guide for 94GB GPU:
+    # ========================================
+    # Utilization < 40% (e.g., 33%): Aggressive scaling to suggested batch size
+    # Utilization 40-60%: Moderate scaling (halfway to suggested)
+    # Utilization 60-70%: Conservative scaling (+2 only)
+    # Utilization 70-85%: No change (optimal range)
+    # Utilization 85-92%: Warning but continue
+    # Utilization > 92%: Auto-reduce to prevent OOM
+    #
+    # Expected batch sizes after auto-scaling:
+    # - If starts at 8 with 33% util → scales to ~20 (but capped at 16)
+    # - If starts at 8 with 50% util → scales to ~11
+    # - If starts at 8 with 70% util → stays at 8
     
     # Trajectory settings
     MIN_TRAJECTORY = 2
@@ -621,7 +659,74 @@ def train():
     
     model.to(device)
     
-    # Optimizer with warmup
+    # Quick memory test with first batch
+    if torch.cuda.is_available():
+        print("\n🔍 Testing memory usage with first batch...")
+        try:
+            test_item = dataset[0]
+            test_prompt = f"Question: {test_item['question']}\nLet's solve this step by step.\n\nSolution: {test_item['answer']}"
+            test_inputs = tokenizer(test_prompt, return_tensors='pt', truncation=True, max_length=max_length).to(device)
+            
+            with torch.no_grad():
+                _ = model(
+                    input_ids=test_inputs['input_ids'],
+                    attention_mask=test_inputs['attention_mask'],
+                    labels=test_inputs['input_ids'],
+                    return_trajectory=True,
+                    temperature=INITIAL_TEMP
+                )
+            
+            test_mem = torch.cuda.max_memory_allocated() / 1024**3
+            estimated_batch_mem = test_mem * batch_size * 1.2  # 20% safety margin
+            
+            print(f"   Single sample: {test_mem:.1f}GB")
+            print(f"   Estimated for batch={batch_size}: {estimated_batch_mem:.1f}GB")
+            
+            if estimated_batch_mem > 90:
+                suggested = int(85 / test_mem)
+                print(f"   ⚠️ May OOM! Auto-adjusting batch_size to {suggested}")
+                batch_size = suggested
+            elif estimated_batch_mem < 50:
+                # Very underutilized - be aggressive
+                suggested = min(max_batch_size, int(80 / test_mem))
+                print(f"   💡 Very low utilization! Auto-adjusting batch_size to {suggested} for better GPU usage")
+                batch_size = suggested
+            elif estimated_batch_mem < 70:
+                # Somewhat underutilized - moderate increase
+                suggested = min(max_batch_size, int(75 / test_mem))
+                print(f"   💡 Can increase batch_size to {suggested} for better utilization")
+                # Auto-adjust if it's significantly underutilized
+                if estimated_batch_mem < 60:
+                    batch_size = suggested
+                    print(f"   Auto-adjusting to batch_size={batch_size}")
+                
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
+            
+        except Exception as e:
+            print(f"   Memory test failed: {e}")
+    
+    # Scale learning rates based on actual batch size
+    # Rule: scale with sqrt of batch size increase from base of 4
+    lr_scale = np.sqrt(batch_size / 4)
+    learning_rate = base_learning_rate * lr_scale
+    navigator_lr = base_navigator_lr * lr_scale
+    
+    # Adjust gradient accumulation to maintain target effective batch size
+    gradient_accumulation_steps = max(1, target_effective_batch // batch_size)
+    actual_effective_batch = batch_size * gradient_accumulation_steps
+    
+    print(f"\n📚 Configuration adjusted for batch_size={batch_size}:")
+    print(f"   Gradient accumulation: {gradient_accumulation_steps} steps")
+    print(f"   Effective batch size: {actual_effective_batch}")
+    print(f"   Base LR: {learning_rate:.2e}, Navigator LR: {navigator_lr:.2e}")
+    
+    # Store the final batch size for use in training loops
+    final_batch_size = batch_size
+    
+    print("="*60)
+    
+    # Optimizer with warmup - NOW we have learning rates defined
     navigator_params = list(model.navigator.parameters())
     navigator_param_ids = {id(p) for p in navigator_params}
     base_params = [p for p in model.parameters() if p.requires_grad and id(p) not in navigator_param_ids]
@@ -642,10 +747,10 @@ def train():
     
     print("\n🚀 Starting FULL MODEL training with VARIABLE trajectories!")
     print(f"   • Training all {total_params/1e9:.2f}B parameters")
-    print(f"   • Batch size: {batch_size} × {gradient_accumulation_steps} accumulation = {batch_size * gradient_accumulation_steps} effective")
+    print(f"   • Final batch size: {final_batch_size} × {gradient_accumulation_steps} accumulation = {actual_effective_batch} effective")
     print(f"   • Target trajectory: {TARGET_TRAJECTORY}")
     print(f"   • Temperature: {INITIAL_TEMP} → {FINAL_TEMP}")
-    print(f"   • Learning rate: {learning_rate} (base), {navigator_lr} (navigator)")
+    print(f"   • Learning rate: {learning_rate:.2e} (base), {navigator_lr:.2e} (navigator)")
     print("="*60)
     
     global_step = 0
@@ -653,9 +758,14 @@ def train():
     
     # Track metrics
     accuracy_by_length = defaultdict(lambda: {'correct': 0, 'total': 0})
+    trajectory_trends = []  # Track trajectory distribution over time
     
     for epoch in range(num_epochs):
         print(f"\n📅 Epoch {epoch+1}/{num_epochs}")
+        
+        # Reset batch size if it was reduced in previous epoch
+        if epoch > 0 and oom_count > 0:
+            print(f"   Note: Batch size adjusted to {final_batch_size} due to previous OOM")
         
         # Anneal temperature
         temperature = INITIAL_TEMP - (INITIAL_TEMP - FINAL_TEMP) * (epoch / num_epochs)
@@ -666,21 +776,31 @@ def train():
         epoch_rewards = []
         epoch_losses = []
         epoch_natural_stops = []
+        successful_batches = 0  # Track successful batches this epoch
         
         dataset_size = min(len(dataset), 1000)
-        num_batches = dataset_size // batch_size
+        # Use final_batch_size for consistent batching
+        num_batches = dataset_size // final_batch_size
         progress_bar = tqdm(range(num_batches), desc=f"Epoch {epoch+1}")
         
         optimizer.zero_grad()
         
         for batch_idx in progress_bar:
+            # Dynamic batch size adjustment after OOM
+            current_batch_size = final_batch_size
+            if oom_count > 0 and final_batch_size > min_batch_size:
+                # Reduce batch size after OOM
+                current_batch_size = max(min_batch_size, final_batch_size - oom_count * 2)
+                if batch_idx == 0:
+                    print(f"\n⚠️ Adjusted batch size to {current_batch_size} due to {oom_count} OOM events")
+            
             batch_items = []
             batch_questions = []
             batch_answers = []
             
-            # Collect batch of samples
-            for i in range(batch_size):
-                idx = (batch_idx * batch_size + i) % len(dataset)
+            # Collect batch of samples (with current size)
+            for i in range(current_batch_size):
+                idx = (batch_idx * final_batch_size + i) % len(dataset)
                 item = dataset[idx]
                 batch_items.append(item)
                 batch_questions.append(item['question'])
@@ -693,7 +813,7 @@ def train():
             batch_rewards = []
             batch_losses = []
             
-            for i in range(batch_size):
+            for i in range(current_batch_size):
                 question = batch_questions[i]
                 answer_text = batch_answers[i]
                 
@@ -770,16 +890,25 @@ def train():
                             loss = loss + 0.2  # Penalty for always maxing out
                         
                         # Scale by both batch size and gradient accumulation
-                        loss = loss / (batch_size * gradient_accumulation_steps)
+                        loss = loss / (final_batch_size * gradient_accumulation_steps)
                         loss.backward()
                         batch_losses.append(loss.item())
                     
                 except torch.cuda.OutOfMemoryError:
                     print(f"\n  ⚠️ OOM in sample {i} of batch {batch_idx}!")
-                    print(f"  Consider reducing batch_size to {batch_size - 1} or increasing gradient_accumulation_steps")
+                    print(f"  Peak memory: {torch.cuda.max_memory_allocated() / 1024**3:.1f}GB")
+                    oom_count += 1
+                    
+                    # Clear memory
                     torch.cuda.empty_cache()
                     gc.collect()
                     optimizer.zero_grad()
+                    
+                    # Suggest reduction
+                    if final_batch_size > min_batch_size:
+                        suggested_size = max(min_batch_size, final_batch_size - 2)
+                        print(f"  💡 Consider reducing batch_size to {suggested_size}")
+                        final_batch_size = suggested_size  # Auto-reduce for next epoch
                     continue
                     
                 except Exception as e:
@@ -793,13 +922,129 @@ def train():
             epoch_losses.extend(batch_losses)
             epoch_natural_stops.extend(batch_natural_stops)
             
-            # Debug output
+            # Track successful batch
+            if len(batch_losses) > 0:
+                successful_batches += 1
+                total_successful_batches += 1
+                
+                # Auto-adjust batch size based on memory after first successful batch
+                if epoch == 0 and successful_batches == 1 and torch.cuda.is_available():
+                    peak_mem = torch.cuda.max_memory_allocated() / 1024**3
+                    util = (peak_mem / 94) * 100
+                    
+                    if util < 70:
+                        # We have room to grow
+                        suggested = min(max_batch_size, int(final_batch_size * (85 / util)))
+                        print(f"\n💡 Memory utilization is only {util:.0f}%. Consider batch_size={suggested} for ~85% utilization")
+                        
+                        # Auto-increase more aggressively based on utilization
+                        if util < 40:
+                            # Very low utilization - increase to suggested value
+                            new_batch_size = suggested
+                            print(f"   Auto-increasing batch_size to {new_batch_size} (aggressive scaling)")
+                        elif util < 60:
+                            # Moderate utilization - increase halfway to suggested
+                            new_batch_size = min(suggested, final_batch_size + (suggested - final_batch_size) // 2)
+                            print(f"   Auto-increasing batch_size to {new_batch_size} (moderate scaling)")
+                        else:
+                            # Close to 70% - conservative increase
+                            new_batch_size = min(suggested, final_batch_size + 2)
+                            print(f"   Auto-increasing batch_size to {new_batch_size} (conservative scaling)")
+                        
+                        final_batch_size = new_batch_size
+                        # Recalculate gradient accumulation for new batch size
+                        gradient_accumulation_steps = max(1, target_effective_batch // final_batch_size)
+                        print(f"   Gradient accumulation adjusted to {gradient_accumulation_steps} steps")
+                        
+                    elif util > 92:
+                        # Too close to limit
+                        suggested = max(min_batch_size, int(final_batch_size * (85 / util)))
+                        print(f"\n⚠️ Memory utilization is {util:.0f}% (risky). Auto-reducing batch_size to {suggested} for safety")
+                        final_batch_size = suggested
+                        # Recalculate gradient accumulation for new batch size
+                        gradient_accumulation_steps = max(1, target_effective_batch // final_batch_size)
+            
+            # Debug output with running averages, memory info, and trajectory distribution
             if batch_idx % 10 == 0 and batch_idx > 0:
-                print(f"\n  Batch {batch_idx} summary:")
-                print(f"  Batch accuracy: {np.mean(batch_correct):.2%}")
-                print(f"  Avg trajectory: {np.mean(batch_trajectory_lengths):.1f}")
-                print(f"  Natural stops: {np.mean(batch_natural_stops):.1%}")
-                print(f"  Avg reward: {np.mean(batch_rewards):.2f}")
+                # Calculate running averages over last 50 samples (or all if less)
+                window_size = min(50, len(epoch_correct))
+                recent_correct = epoch_correct[-window_size:] if window_size > 0 else []
+                recent_trajectories = epoch_trajectories[-window_size:] if window_size > 0 else []
+                recent_stops = epoch_natural_stops[-window_size:] if window_size > 0 else []
+                recent_rewards = epoch_rewards[-window_size:] if window_size > 0 else []
+                
+                # Memory stats
+                if torch.cuda.is_available():
+                    current_mem = torch.cuda.memory_allocated() / 1024**3
+                    peak_mem = torch.cuda.max_memory_allocated() / 1024**3
+                    utilization = (peak_mem / 94) * 100
+                
+                print(f"\n  📊 Batch {batch_idx} (samples {batch_idx * final_batch_size}-{(batch_idx + 1) * final_batch_size - 1}):")
+                print(f"     Current batch (n={current_batch_size}): {np.mean(batch_correct):.0%} correct")
+                print(f"     Last 50 samples: {np.mean(recent_correct):.1%} correct")
+                print(f"     Epoch so far: {np.mean(epoch_correct):.1%} correct")
+                
+                # Trajectory statistics
+                print(f"\n     🎯 Trajectory Stats:")
+                print(f"        Current batch avg: {np.mean(batch_trajectory_lengths):.1f} steps")
+                print(f"        Last 50 samples avg: {np.mean(recent_trajectories):.1f} steps")
+                print(f"        Epoch avg: {np.mean(epoch_trajectories):.1f} steps")
+                
+                # Trajectory distribution for current batch
+                traj_dist = {}
+                for traj_len in batch_trajectory_lengths:
+                    traj_dist[traj_len] = traj_dist.get(traj_len, 0) + 1
+                
+                print(f"        Distribution (current batch):")
+                for steps in sorted(traj_dist.keys()):
+                    count = traj_dist[steps]
+                    pct = (count / len(batch_trajectory_lengths)) * 100
+                    bar = '█' * int(pct / 5)  # Scale to fit
+                    print(f"          {steps} steps: {bar:<20} {count}/{len(batch_trajectory_lengths)} ({pct:.0f}%)")
+                
+                # Trajectory vs correctness correlation
+                correct_by_traj = {}
+                for i, traj_len in enumerate(batch_trajectory_lengths):
+                    if traj_len not in correct_by_traj:
+                        correct_by_traj[traj_len] = {'correct': 0, 'total': 0}
+                    correct_by_traj[traj_len]['total'] += 1
+                    if batch_correct[i]:
+                        correct_by_traj[traj_len]['correct'] += 1
+                
+                print(f"        Accuracy by trajectory length (batch):")
+                for steps in sorted(correct_by_traj.keys()):
+                    stats = correct_by_traj[steps]
+                    acc = (stats['correct'] / stats['total']) * 100 if stats['total'] > 0 else 0
+                    print(f"          {steps} steps: {acc:.0f}% correct ({stats['correct']}/{stats['total']})")
+                
+                print(f"\n     Natural stops: {np.mean(recent_stops):.1%}")
+                print(f"     Avg reward: {np.mean(recent_rewards):.2f}")
+                
+                if torch.cuda.is_available():
+                    print(f"     💾 Memory: {current_mem:.1f}GB current, {peak_mem:.1f}GB peak ({utilization:.0f}% util)")
+                
+                # Show sample question with trajectory info
+                if len(batch_questions) > 0 and len(batch_trajectory_lengths) > 0:
+                    sample_idx = random.randint(0, min(len(batch_questions), len(batch_trajectory_lengths)) - 1)
+                    sample_q = batch_questions[sample_idx]
+                    sample_traj = batch_trajectory_lengths[sample_idx]
+                    sample_correct = batch_correct[sample_idx] if sample_idx < len(batch_correct) else False
+                    
+                    print(f"\n     📝 Sample from batch:")
+                    print(f"        Question: '{sample_q[:100]}{'...' if len(sample_q) > 100 else ''}'")
+                    print(f"        Used {sample_traj} reasoning steps → {'✓' if sample_correct else '✗'} correct")
+                    print(f"        Question complexity: {len(sample_q.split())} words")
+                
+                # Track trajectory trends every 50 batches
+                if batch_idx % 50 == 0:
+                    trend_snapshot = {
+                        'epoch': epoch,
+                        'batch': batch_idx,
+                        'distribution': dict(traj_dist),
+                        'avg_steps': np.mean(recent_trajectories),
+                        'accuracy': np.mean(recent_correct)
+                    }
+                    trajectory_trends.append(trend_snapshot)
             
             # Gradient accumulation
             if (batch_idx + 1) % gradient_accumulation_steps == 0 or batch_idx == num_batches - 1:
@@ -822,48 +1067,89 @@ def train():
                     torch.cuda.empty_cache()
                     gc.collect()
             
-            # Update progress bar
+            # Update progress bar with running averages including trajectory details
             if len(epoch_correct) > 0:
-                recent_acc = np.mean(epoch_correct[-50:]) if len(epoch_correct) >= 50 else np.mean(epoch_correct)
-                recent_traj = np.mean(epoch_trajectories[-50:]) if len(epoch_trajectories) >= 50 else np.mean(epoch_trajectories)
-                recent_reward = np.mean(epoch_rewards[-50:]) if len(epoch_rewards) >= 50 else np.mean(epoch_rewards)
-                recent_stops = np.mean(epoch_natural_stops[-50:]) if len(epoch_natural_stops) >= 50 else np.mean(epoch_natural_stops)
+                # Use larger windows for more stable metrics
+                window_size = min(100, len(epoch_correct))
+                recent_acc = np.mean(epoch_correct[-window_size:]) if len(epoch_correct) >= window_size else np.mean(epoch_correct)
+                recent_traj = np.mean(epoch_trajectories[-window_size:]) if len(epoch_trajectories) >= window_size else np.mean(epoch_trajectories)
+                recent_reward = np.mean(epoch_rewards[-window_size:]) if len(epoch_rewards) >= window_size else np.mean(epoch_rewards)
+                recent_stops = np.mean(epoch_natural_stops[-window_size:]) if len(epoch_natural_stops) >= window_size else np.mean(epoch_natural_stops)
                 
-                progress_bar.set_postfix({
-                    'traj': f"{recent_traj:.1f}",
+                # Calculate trajectory mode (most common length)
+                if len(epoch_trajectories) > 0:
+                    traj_mode = Counter(epoch_trajectories[-window_size:]).most_common(1)[0][0]
+                else:
+                    traj_mode = 0
+                
+                postfix_dict = {
+                    'steps': f"{recent_traj:.1f}",
+                    'mode': f"{traj_mode}",
                     'acc': f"{recent_acc:.1%}",
                     'stop': f"{recent_stops:.1%}",
-                    'reward': f"{recent_reward:.2f}"
-                })
+                    'reward': f"{recent_reward:.2f}",
+                    'total': f"{np.mean(epoch_correct):.1%}"
+                }
+                
+                # Add memory info every 20 batches
+                if batch_idx % 20 == 0 and torch.cuda.is_available():
+                    mem_gb = torch.cuda.memory_allocated() / 1024**3
+                    postfix_dict['mem'] = f"{mem_gb:.1f}GB"
+                
+                progress_bar.set_postfix(postfix_dict)
         
-        # Epoch summary
+        # Epoch summary with detailed trajectory analysis
         print(f"\n📊 Epoch {epoch+1} Summary:")
-        print(f"  • Avg trajectory: {np.mean(epoch_trajectories):.2f}")
-        print(f"  • Natural stops: {np.mean(epoch_natural_stops):.1%}")
         print(f"  • Accuracy: {np.mean(epoch_correct):.2%}")
         print(f"  • Avg reward: {np.mean(epoch_rewards):.3f}")
         
-        # Print accuracy by trajectory length
-        print(f"  • Accuracy by trajectory length:")
+        # Detailed trajectory statistics
+        print(f"\n  🎯 Trajectory Analysis:")
+        print(f"  • Average trajectory: {np.mean(epoch_trajectories):.2f} steps")
+        print(f"  • Std deviation: {np.std(epoch_trajectories):.2f}")
+        print(f"  • Min/Max: {min(epoch_trajectories) if epoch_trajectories else 0}/{max(epoch_trajectories) if epoch_trajectories else 0}")
+        print(f"  • Natural stops: {np.mean(epoch_natural_stops):.1%}")
+        
+        # Overall trajectory distribution
+        print(f"\n  • Trajectory distribution (full epoch):")
+        epoch_traj_dist = {}
+        for traj_len in epoch_trajectories:
+            epoch_traj_dist[traj_len] = epoch_traj_dist.get(traj_len, 0) + 1
+        
+        for i in range(MAX_TRAJECTORY + 1):
+            count = epoch_traj_dist.get(i, 0)
+            if count > 0:
+                pct = count / len(epoch_trajectories) * 100
+                bar = '█' * int(pct/2)
+                print(f"    {i} steps: {bar:<25} {count} samples ({pct:.1f}%)")
+        
+        # Accuracy by trajectory length (full epoch)
+        print(f"\n  • Accuracy by trajectory length:")
         for length in sorted(accuracy_by_length.keys()):
             stats = accuracy_by_length[length]
             if stats['total'] > 0:
                 acc = stats['correct'] / stats['total']
-                print(f"    Length {length}: {acc:.2%} ({stats['total']} samples)")
+                pct_of_total = (stats['total'] / len(epoch_trajectories)) * 100 if epoch_trajectories else 0
+                print(f"    {length} steps: {acc:.2%} accuracy ({stats['total']} samples, {pct_of_total:.1f}% of epoch)")
         
-        # Distribution of trajectories
-        print(f"  • Trajectory distribution:")
-        for i in range(MAX_TRAJECTORY + 1):
-            count = epoch_trajectories.count(i)
-            if count > 0:
-                pct = count / len(epoch_trajectories) * 100
-                bar = '█' * int(pct/2)
-                print(f"    {i}: {bar:<25} {pct:.1f}%")
+        # Find optimal trajectory length
+        best_acc = 0
+        best_length = 0
+        for length, stats in accuracy_by_length.items():
+            if stats['total'] >= 10:  # Only consider lengths with enough samples
+                acc = stats['correct'] / stats['total']
+                if acc > best_acc:
+                    best_acc = acc
+                    best_length = length
+        
+        if best_length > 0:
+            print(f"\n  📌 Best performing trajectory: {best_length} steps with {best_acc:.2%} accuracy")
         
         # Validation (increased samples for better metrics)
         print(f"\n🔍 Running validation...")
         val_correct = 0
         val_trajectories = []
+        val_trajectory_lengths = []
         val_total = 100  # Increased from 30 for more stable metrics
         
         for i in tqdm(range(val_total), desc="Validating"):
@@ -873,14 +1159,57 @@ def train():
             
             prompt = f"Question: {question}\nLet's solve this step by step.\n\nSolution:"
             
-            # Generate with natural stopping
-            generated = generate_simple(model, tokenizer, prompt, max_new_tokens=100)
-            
-            if check_answer_correctness(generated, answer_text):
-                val_correct += 1
+            # Get trajectory info during validation
+            try:
+                val_inputs = tokenizer(
+                    prompt,
+                    return_tensors='pt',
+                    truncation=True,
+                    max_length=max_length
+                ).to(device)
+                
+                with torch.no_grad():
+                    val_outputs = model(
+                        input_ids=val_inputs['input_ids'],
+                        attention_mask=val_inputs['attention_mask'],
+                        return_trajectory=True,
+                        temperature=0.5  # Lower temperature for validation
+                    )
+                
+                val_trajectory = val_outputs.get('trajectory', {})
+                val_traj_length = len(val_trajectory.get('states', []))
+                val_trajectory_lengths.append(val_traj_length)
+                
+                # Generate answer
+                generated = generate_simple(model, tokenizer, prompt, max_new_tokens=100)
+                
+                if check_answer_correctness(generated, answer_text):
+                    val_correct += 1
+                    
+            except Exception as e:
+                print(f"\n  Validation error on sample {i}: {e}")
+                val_trajectory_lengths.append(0)
+                continue
         
         val_accuracy = val_correct / val_total
-        print(f"📊 Validation Accuracy: {val_accuracy:.2%} ({val_correct}/{val_total})")
+        avg_val_trajectory = np.mean(val_trajectory_lengths) if val_trajectory_lengths else 0
+        
+        print(f"\n📊 Validation Results:")
+        print(f"  • Accuracy: {val_accuracy:.2%} ({val_correct}/{val_total})")
+        print(f"  • Avg trajectory: {avg_val_trajectory:.2f} steps")
+        
+        # Validation trajectory distribution
+        if val_trajectory_lengths:
+            val_traj_dist = {}
+            for traj_len in val_trajectory_lengths:
+                val_traj_dist[traj_len] = val_traj_dist.get(traj_len, 0) + 1
+            
+            print(f"  • Trajectory distribution (validation):")
+            for steps in sorted(val_traj_dist.keys()):
+                count = val_traj_dist[steps]
+                pct = (count / len(val_trajectory_lengths)) * 100
+                bar = '█' * int(pct/3)
+                print(f"    {steps} steps: {bar:<20} {count} ({pct:.0f}%)")
         
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
@@ -901,6 +1230,35 @@ def train():
     print("\n" + "="*60)
     print("✅ Training complete!")
     print(f"📊 Best validation accuracy: {best_val_accuracy:.2%}")
+    print(f"📈 Total successful batches: {total_successful_batches}")
+    
+    # Trajectory evolution analysis
+    if trajectory_trends:
+        print(f"\n🎯 Trajectory Evolution During Training:")
+        print("  How average steps changed over time:")
+        for i, trend in enumerate(trajectory_trends[-5:]):  # Show last 5 snapshots
+            print(f"  Epoch {trend['epoch']+1}, Batch {trend['batch']}: {trend['avg_steps']:.1f} avg steps, {trend['accuracy']:.1%} acc")
+        
+        # Check if model converged to specific trajectory length
+        final_trends = trajectory_trends[-3:] if len(trajectory_trends) >= 3 else trajectory_trends
+        avg_steps_variance = np.std([t['avg_steps'] for t in final_trends])
+        if avg_steps_variance < 0.5:
+            final_avg = np.mean([t['avg_steps'] for t in final_trends])
+            print(f"\n  ✓ Model converged to ~{final_avg:.1f} reasoning steps")
+        else:
+            print(f"\n  ✓ Model maintains diverse trajectory lengths (std: {avg_steps_variance:.2f})")
+    
+    if torch.cuda.is_available():
+        final_peak = torch.cuda.max_memory_allocated() / 1024**3
+        final_util = (final_peak / 94) * 100
+        print(f"\n💾 Peak memory usage: {final_peak:.1f}GB ({final_util:.0f}% utilization)")
+        
+        if final_util < 80:
+            suggested_final = int(final_batch_size * (85 / final_util))
+            print(f"💡 For future runs, consider batch_size={suggested_final} for optimal GPU usage")
+        
+    if oom_count > 0:
+        print(f"⚠️ Encountered {oom_count} OOM errors. Final batch_size was adjusted to {final_batch_size}")
 
 if __name__ == "__main__":
     import warnings
