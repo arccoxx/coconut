@@ -4,6 +4,7 @@ Generalized Multi-Trajectory COCONUT - Final Clean Implementation
 ==================================================================
 A general reasoning framework where trajectories naturally discover 
 their own specializations through training, without pre-specified strategies.
+Builds upon COCONUT from Facebook research.
 
 Key Features:
 - Multiple trajectories explore reasoning space in parallel
@@ -17,8 +18,8 @@ Usage:
     python coconut.py --debug       # Debug mode with minimal samples
     python coconut.py --test        # Test single sample
 
-Author: Advanced AI Research
-Date: 2024
+Author: Aidan Collins, Claude, Grok
+Date: 2025
 """
 
 # ============================================================
