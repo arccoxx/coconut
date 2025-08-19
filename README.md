@@ -1,4 +1,4 @@
-# 🥥 LongShot: Chain of Continuous Trajectories
+# 🎯 LongShot: Chain of Continuous Trajectories
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-red.svg)](https://pytorch.org/)
@@ -7,7 +7,7 @@
 
 **Enhancing LLM reasoning through continuous latent thought trajectories and self-supervised reinforcement learning**
 
-## 🎯 Overview
+## 🥥 Overview
 
 Long Shot builds on COCONUT and revolutionizes how Large Language Models (LLMs) approach complex reasoning by introducing continuous thought trajectories in latent space. Unlike traditional token-based chain-of-thought methods, our approach enables models to navigate through fluid reasoning paths, achieving **~70% accuracy on GSM8K** with just two epochs of PPO training.
 
