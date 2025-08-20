@@ -112,12 +112,12 @@ answers = model.generate(
 
 ## 📊 Benchmarks
 
-| Model | GSM8K | MATH | HumanEval | Training Time |
+| Model | GSM8K | Training Time |
 |-------|-------|------|-----------|---------------|
-| **COCONUT (Ours)** | **70.2%** | **42.1%** | **68.5%** | **2 epochs** |
-| Llama-3-8B (base) | 35.4% | 18.2% | 45.3% | - |
-| Llama-3-8B (CoT) | 52.1% | 28.7% | 58.2% | 10 epochs |
-| GPT-3.5 (CoT) | 57.8% | 34.1% | 62.4% | - |
+| **COCONUT (Ours)** | **70.2%** | **2 epochs** |
+| Llama-3-8B (base) | 35.4% |
+| Llama-3-8B (CoT) | 52.1% |
+| GPT-3.5 (CoT) | 57.8% |
 
 ## 🏗️ Architecture
 
