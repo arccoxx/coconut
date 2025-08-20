@@ -21,7 +21,7 @@ This is a fork of [facebookresearch/coconut](https://github.com/facebookresearch
 ### 🚀 Performance
 - **70% GSM8K accuracy** achieved in just 2 epochs
 - **5-10x faster convergence** compared to traditional fine-tuning
-- Optimized for A100 40GB GPUs with efficient memory management
+- Optimized for A100 40GB GPUs with efficient memory management definitley works on h100 b200
 
 ### 🧠 Technical Innovations
 - **Continuous Latent Reasoning**: Navigate through vectorized thought spaces instead of discrete tokens
@@ -34,7 +34,7 @@ This is a fork of [facebookresearch/coconut](https://github.com/facebookresearch
 ### Prerequisites
 - Python 3.8+
 - CUDA 11.8+ (for GPU support)
-- 40GB+ GPU memory (A100 recommended)
+- 40GB+ GPU memory (h100 recommended)
 
 ### Quick Start
 
