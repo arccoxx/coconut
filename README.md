@@ -14,7 +14,7 @@ Long Shot builds on COCONUT and revolutionizes how Large Language Models (LLMs) 
 This is a fork of [facebookresearch/coconut](https://github.com/facebookresearch/coconut), building upon their groundbreaking latent thought framework with our innovations in:
 - **Memory Navigation System** - Efficient thought trajectory management
 - **Single & Multi-Trajectory Reasoning** - Adaptive problem-solving strategies
-- **Optimized PPO Implementation** - Memory-efficient training on A100 40GB GPUs
+- **Optimized PPO Implementation** - Memory-efficient training on A100 40GB GPUs for single trajectory b200 reccomended for multi trajectory 
 
 ## ✨ Key Features
 
