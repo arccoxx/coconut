@@ -2,11 +2,9 @@
 """
 Enhanced Multi-Trajectory COCONUT with Graph Neural Network PPO Policy
 ======================================================================
-Clean, debugged version with proper dtype handling and full evaluation metrics.
-Reverted training logic to stable version while preserving evaluation bug fixes.
-
-Architecture: Hybrid GAT-Transformer with PNA Aggregation
-Author: Enhanced by Claude
+Fixed version - resolved "does not require grad" error by removing the
+errant no_grad() context and properly connecting the RL loss to the
+computational graph.
 """
 import torch
 import torch.nn as nn
@@ -75,8 +73,14 @@ class torch_scatter:
                 dim_size = 0
         if dim_size <= 0:
             return torch.zeros(0, *src.shape[1:], dtype=src.dtype, device=src.device)
+        
+        index_expanded = index
+        while index_expanded.dim() < src.dim():
+            index_expanded = index_expanded.unsqueeze(-1)
+        index_expanded = index_expanded.expand_as(src)
+
         out = torch.zeros(dim_size, *src.shape[1:], dtype=src.dtype, device=src.device)
-        out.index_add_(dim, index, src)
+        out.scatter_add_(dim, index_expanded, src)
         return out
     
     @staticmethod
@@ -89,7 +93,9 @@ class torch_scatter:
         if dim_size <= 0:
             return torch.zeros(0, *src.shape[1:], dtype=src.dtype, device=src.device)
         sum_out = torch_scatter.scatter_add(src, index, dim, dim_size)
-        count = torch_scatter.scatter_add(torch.ones_like(src), index, dim, dim_size)
+        
+        ones = torch.ones_like(src)
+        count = torch_scatter.scatter_add(ones, index, dim, dim_size)
         return sum_out / count.clamp(min=1)
     
     @staticmethod
@@ -101,10 +107,20 @@ class torch_scatter:
                 dim_size = 0
         if dim_size <= 0:
             return torch.zeros(0, *src.shape[1:], dtype=src.dtype, device=src.device), torch.zeros(0, *src.shape[1:], dtype=torch.long, device=src.device)
-        out = torch.full((dim_size, *src.shape[1:]), float('-inf'), dtype=src.dtype, device=src.device)
-        unique_indices = torch.unique(index)
-        for idx in unique_indices:
-            out[idx] = torch.max(src[index == idx], dim=0)[0]
+        
+        index_expanded = index
+        while index_expanded.dim() < src.dim():
+            index_expanded = index_expanded.unsqueeze(-1)
+        index_expanded = index_expanded.expand_as(src)
+        
+        out = torch.scatter_reduce(
+            torch.zeros(dim_size, *src.shape[1:], dtype=src.dtype, device=src.device).fill_(float('-inf')),
+            dim=dim,
+            index=index_expanded,
+            src=src,
+            reduce='amax',
+            include_self=True
+        )
         return out, torch.zeros_like(out, dtype=torch.long)
     
     class composite:
@@ -187,10 +203,8 @@ class GraphAttentionLayer(nn.Module):
         alpha = torch_scatter.composite.scatter_softmax(alpha, dst, dim=0)
         alpha = self.dropout(alpha)
         
-        # Message passing
         out = h[src] * alpha.unsqueeze(-1)
         
-        # FIX: Reverted to correct aggregation logic
         N_heads = out.size(1)
         N_features = out.size(2)
         out_flat = out.view(-1, N_features)
@@ -207,7 +221,7 @@ class GraphAttentionLayer(nn.Module):
         return out + self.bias
 
 class GraphTransformerLayer(nn.Module):
-    """Graph Transformer layer for global reasoning with proper dtype handling"""
+    """Graph Transformer layer for global reasoning"""
     
     def __init__(self, hidden_dim: int, num_heads: int = 8, dropout: float = 0.1, device=None, dtype=None):
         super().__init__()
@@ -232,7 +246,7 @@ class GraphTransformerLayer(nn.Module):
         return x
 
 class GraphNeuralPPOPolicy(nn.Module):
-    """Advanced GNN-based PPO Policy Network for trajectory navigation"""
+    """GNN-based PPO Policy Network"""
     
     def __init__(self, state_dim: int, action_dim: int, hidden_dim: int = 256,
                  num_gnn_layers: int = 3, num_transformer_layers: int = 2,
@@ -307,13 +321,10 @@ class GraphNeuralPPOPolicy(nn.Module):
         k = min(self.k_neighbors, memory_bank.size(0))
         knn_distances, knn_indices = torch.topk(distances, k, largest=False, dim=-1)
         
-        src_nodes, dst_nodes = [], []
-        edge_features = []
-        
+        src_nodes, dst_nodes, edge_features = [], [], []
         for i in range(batch_size):
             src_nodes.extend([i] * k)
             dst_nodes.extend(knn_indices[i] + batch_size)
-            
             mem_vals = memory_values[knn_indices[i]]
             mem_ts = memory_timestamps[knn_indices[i]].to(self.dtype)
             edge_features.append(torch.stack([knn_distances[i], mem_vals, mem_ts], dim=-1))
@@ -357,7 +368,6 @@ class GraphNeuralPPOPolicy(nn.Module):
         
         traj_repr = h[:1]
         mem_repr = h[1:].mean(dim=0, keepdim=True)
-        
         attention_weights = self.global_attention(h)
         global_repr = (h * attention_weights).sum(dim=0, keepdim=True)
         
@@ -368,13 +378,14 @@ class GraphNeuralPPOPolicy(nn.Module):
 class GNNEnhancedMultiTrajectoryNavigator(nn.Module):
     def __init__(self, hidden_size: int, reasoning_dim: int = 256, max_trajectories: int = 5,
                  shared_memory_size: int = 200, dropout_rate: float = 0.1,
-                 device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None, **kwargs):
+                 device: Optional[torch.device] = None, dtype: Optional[torch.dtype] = None):
         super().__init__()
         self.hidden_size = hidden_size
         self.reasoning_dim = reasoning_dim
         self.max_trajectories = max_trajectories
         self.device = device or torch.device('cpu')
         self.dtype = dtype or torch.bfloat16
+        self.memory_bank_size = shared_memory_size
         
         self.gnn_policy = GraphNeuralPPOPolicy(
             state_dim=reasoning_dim, action_dim=reasoning_dim, hidden_dim=reasoning_dim,
@@ -382,12 +393,6 @@ class GNNEnhancedMultiTrajectoryNavigator(nn.Module):
         )
         self.state_projection = nn.Linear(hidden_size, reasoning_dim, device=self.device).to(self.dtype)
         self.thought_projection = nn.Linear(reasoning_dim, hidden_size, device=self.device).to(self.dtype)
-        
-        self.memory_bank = torch.zeros(shared_memory_size, reasoning_dim, device=device, dtype=dtype)
-        self.memory_values = torch.zeros(shared_memory_size, device=device, dtype=dtype)
-        self.memory_timestamps = torch.zeros(shared_memory_size, device=device, dtype=torch.long)
-        self.memory_ptr = 0
-        self.total_writes = 0
         
         self.trajectory_heads = nn.ModuleList([
             nn.ModuleDict({
@@ -399,45 +404,37 @@ class GNNEnhancedMultiTrajectoryNavigator(nn.Module):
             embed_dim=reasoning_dim, num_heads=4, dropout=dropout_rate, batch_first=True, device=self.device
         ).to(self.dtype)
 
-    def update_memory(self, position: torch.Tensor, value: float):
-        with torch.no_grad():
-            pos = position.squeeze().to(self.dtype)
-            val = value.item() if isinstance(value, torch.Tensor) else value
-            self.memory_bank[self.memory_ptr] = pos
-            self.memory_values[self.memory_ptr] = val
-            self.memory_timestamps[self.memory_ptr] = self.total_writes
-            self.memory_ptr = (self.memory_ptr + 1) % self.memory_bank.size(0)
-            self.total_writes += 1
-
-    def navigate_with_gnn(self, state: torch.Tensor, num_trajectories: int, temperature: float = 1.0) -> Dict[str, Any]:
+    def navigate_with_gnn(self, state: torch.Tensor, num_trajectories: int, memory_state: Dict[str, torch.Tensor], temperature: float = 1.0) -> Dict[str, Any]:
         state_projected = self.state_projection(state.to(self.dtype))
         
-        valid_mem_size = self.total_writes if self.total_writes < self.memory_bank.size(0) else self.memory_bank.size(0)
-        valid_memory = self.memory_bank[:valid_mem_size] if valid_mem_size > 0 else None
+        valid_mem_size = memory_state['total_writes'] if memory_state['total_writes'] < self.memory_bank_size else self.memory_bank_size
+        valid_memory = memory_state['memory_bank'][:valid_mem_size] if valid_mem_size > 0 else None
+        valid_values = memory_state['memory_values'][:valid_mem_size] if valid_mem_size > 0 else None
+        valid_timestamps = memory_state['memory_timestamps'][:valid_mem_size] if valid_mem_size > 0 else None
 
         action_logits, values = self.gnn_policy(
-            state_projected.expand(num_trajectories, -1),
+            state_projected.repeat(num_trajectories, 1),
             valid_memory,
-            self.memory_values[:valid_mem_size] if valid_mem_size > 0 else None,
-            self.memory_timestamps[:valid_mem_size] if valid_mem_size > 0 else None
+            valid_values,
+            valid_timestamps
         )
         
         trajectory_outputs = []
         for i in range(num_trajectories):
-            pos = action_logits[i]
-            if self.training:
-                pos = torch.distributions.Normal(pos, temperature).sample()
+            dist = torch.distributions.Normal(action_logits[i], temperature)
+            pos = dist.sample()
+            log_prob = dist.log_prob(pos).sum()
             
             heads = self.trajectory_heads[i % self.max_trajectories]
             continue_probs = F.softmax(heads['continue'](pos.unsqueeze(0)), dim=-1)
             stop_vote = torch.argmax(continue_probs).item() == 1
             
-            self.update_memory(pos, values[i])
             trajectory_outputs.append({
                 'thought': self.thought_projection(pos),
                 'position': pos,
                 'stop_vote': stop_vote,
                 'value': values[i],
+                'log_prob': log_prob,
             })
 
         positions = torch.stack([out['position'] for out in trajectory_outputs])
@@ -445,6 +442,7 @@ class GNNEnhancedMultiTrajectoryNavigator(nn.Module):
         
         for i, out in enumerate(trajectory_outputs):
             out['position'] = attended_positions.squeeze(0)[i]
+            out['thought'] = self.thought_projection(out['position'])
 
         ensemble_thought = torch.stack([out['thought'] for out in trajectory_outputs]).mean(dim=0)
         ensemble_stop = sum(out['stop_vote'] for out in trajectory_outputs) > num_trajectories / 2
@@ -452,8 +450,7 @@ class GNNEnhancedMultiTrajectoryNavigator(nn.Module):
         return {
             'ensemble_thought': ensemble_thought,
             'ensemble_stop': torch.tensor(ensemble_stop, device=self.device),
-            'num_trajectories': num_trajectories,
-            'memory_usage': valid_mem_size
+            'trajectory_outputs': trajectory_outputs,
         }
 
 class EnhancedCoconutWithGNN(nn.Module):
@@ -466,7 +463,8 @@ class EnhancedCoconutWithGNN(nn.Module):
         dtype = next(base_model.parameters()).dtype
         
         self.navigator = GNNEnhancedMultiTrajectoryNavigator(
-            hidden_size=hidden_size, reasoning_dim=reasoning_dim, device=device, dtype=dtype, max_trajectories=max_trajectories
+            hidden_size=hidden_size, reasoning_dim=reasoning_dim, device=device, dtype=dtype, max_trajectories=max_trajectories,
+            shared_memory_size=500
         )
         self.complexity_analyzer = nn.Sequential(
             nn.Linear(hidden_size, 1), nn.Sigmoid()
@@ -475,6 +473,16 @@ class EnhancedCoconutWithGNN(nn.Module):
             nn.Linear(hidden_size + 1, max_trajectories - 2 + 1), nn.Softmax(dim=-1)
         ).to(device).to(dtype)
         
+        self.shared_memory_size = 500
+        self.register_buffer('memory_bank', torch.zeros(self.shared_memory_size, reasoning_dim, device=device, dtype=dtype))
+        self.register_buffer('memory_values', torch.zeros(self.shared_memory_size, device=device, dtype=dtype))
+        self.register_buffer('memory_timestamps', torch.zeros(self.shared_memory_size, device=device, dtype=torch.long))
+        self.register_buffer('memory_ptr', torch.tensor(0, device=device, dtype=torch.long))
+        self.register_buffer('total_writes', torch.tensor(0, device=device, dtype=torch.long))
+        
+        self.pending_positions = []
+        self.pending_values = []
+        
         if hasattr(self.base_model, 'gradient_checkpointing_enable'):
             self.base_model.gradient_checkpointing_enable()
 
@@ -482,48 +490,166 @@ class EnhancedCoconutWithGNN(nn.Module):
         batch_size = input_ids.shape[0]
         inputs_embeds = self.base_model.get_input_embeddings()(input_ids)
         
-        with torch.no_grad():
-            outputs = self.base_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask, output_hidden_states=True)
-            initial_state = outputs.hidden_states[-1][:, -1, :]
+        # DEBUG FIX: Removed `with torch.no_grad()` to allow gradients to flow
+        outputs = self.base_model(inputs_embeds=inputs_embeds, attention_mask=attention_mask, output_hidden_states=True, use_cache=False)
+        initial_state = outputs.hidden_states[-1][:, -1, :]
         
         complexity_score = self.complexity_analyzer(initial_state)
         traj_probs = self.traj_count_net(torch.cat([initial_state, complexity_score], dim=-1))
         num_trajectories = 2 + torch.argmax(traj_probs, dim=-1)
         
         all_thoughts = []
+        batch_rl_outputs = []
+        
         for b in range(batch_size):
             current_state = initial_state[b]
             thoughts = []
-            for _ in range(self.max_latent_steps):
-                nav_output = self.navigator.navigate_with_gnn(current_state, num_trajectories[b].item())
+            item_rl_outputs = []
+            
+            memory_state = {
+                'memory_bank': self.memory_bank,
+                'memory_values': self.memory_values,
+                'memory_timestamps': self.memory_timestamps,
+                'total_writes': self.total_writes
+            }
+            
+            for step in range(self.max_latent_steps):
+                nav_output = self.navigator.navigate_with_gnn(current_state, num_trajectories[b].item(), memory_state)
+                thoughts.append(nav_output['ensemble_thought'])
+                current_state = nav_output['ensemble_thought']
+                
+                if self.training:
+                    item_rl_outputs.extend(nav_output['trajectory_outputs'])
+                
+                if nav_output['ensemble_stop']:
+                    break
+            
+            all_thoughts.append(torch.stack(thoughts) if thoughts else torch.empty(0, self.hidden_size, device=self.device, dtype=self.dtype))
+            if self.training:
+                batch_rl_outputs.append(item_rl_outputs)
+
+        if self.training and batch_rl_outputs:
+            flat_rl_outputs = [item for sublist in batch_rl_outputs for item in sublist]
+            if flat_rl_outputs:
+                self.pending_positions = [t['position'] for t in flat_rl_outputs]
+                self.pending_values = [t['value'].item() for t in flat_rl_outputs]
+
+        max_len = max(len(t) for t in all_thoughts) if all_thoughts and any(len(t) > 0 for t in all_thoughts) else 0
+        if max_len > 0:
+            padded_thoughts = torch.stack([F.pad(t, (0, 0, 0, max_len - len(t))) for t in all_thoughts])
+            final_embeds = torch.cat([inputs_embeds, padded_thoughts], dim=1)
+            final_mask = F.pad(attention_mask, (0, max_len), value=1)
+            
+        else:
+            final_embeds = inputs_embeds
+            final_mask = attention_mask
+
+        # This supervised loss calculation is no longer relevant for the main RL-only loss
+        outputs = self.base_model(inputs_embeds=final_embeds, attention_mask=final_mask, labels=labels)
+        
+        return_dict = {
+            'loss': outputs.loss if labels is not None else None,
+            'logits': outputs.logits,
+            'avg_trajectories': num_trajectories.float().mean().item() if num_trajectories.numel() > 0 else 0,
+            'trajectory_length': np.mean([len(t) for t in all_thoughts]),
+            'all_thoughts': all_thoughts
+        }
+        if self.training:
+            return_dict['rl_trajectory_outputs'] = batch_rl_outputs
+            return_dict['num_trajectories_per_item'] = [n.item() for n in num_trajectories]
+            return_dict['num_steps_per_item'] = [len(t) for t in all_thoughts]
+            
+        return return_dict
+    
+    # New method for GNN-enhanced generation during evaluation
+    def generate(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None, max_new_tokens: int = 256, **kwargs):
+        self.eval()
+        with torch.no_grad():
+            outputs = self.base_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, use_cache=True)
+            initial_state = outputs.hidden_states[-1][:, -1, :]
+            
+            # Perform GNN-based reasoning
+            complexity_score = self.complexity_analyzer(initial_state)
+            traj_probs = self.traj_count_net(torch.cat([initial_state, complexity_score], dim=-1))
+            num_trajectories = 2 + torch.argmax(traj_probs, dim=-1)
+            
+            current_state = initial_state.squeeze(0)
+            thoughts = []
+            memory_state = {
+                'memory_bank': self.memory_bank,
+                'memory_values': self.memory_values,
+                'memory_timestamps': self.memory_timestamps,
+                'total_writes': self.total_writes
+            }
+            
+            for step in range(self.max_latent_steps):
+                nav_output = self.navigator.navigate_with_gnn(current_state, num_trajectories.item(), memory_state)
                 thoughts.append(nav_output['ensemble_thought'])
                 current_state = nav_output['ensemble_thought']
                 if nav_output['ensemble_stop']:
                     break
-            all_thoughts.append(torch.stack(thoughts))
-
-        max_len = max(len(t) for t in all_thoughts)
-        padded_thoughts = torch.stack([F.pad(t, (0, 0, 0, max_len - len(t))) for t in all_thoughts])
-        
-        final_embeds = torch.cat([inputs_embeds, padded_thoughts], dim=1)
-        final_mask = F.pad(attention_mask, (0, max_len), value=1)
-        
-        if labels is not None:
-            labels = F.pad(labels, (0, max_len), value=-100)
             
-        outputs = self.base_model(inputs_embeds=final_embeds, attention_mask=final_mask, labels=labels)
+            # Concatenate thoughts to input embeddings
+            inputs_embeds = self.base_model.get_input_embeddings()(input_ids)
+            if thoughts:
+                padded_thoughts = torch.stack(thoughts).unsqueeze(0)
+                final_embeds = torch.cat([inputs_embeds, padded_thoughts], dim=1)
+                final_attention_mask = F.pad(attention_mask, (0, padded_thoughts.shape[1]), value=1)
+            else:
+                final_embeds = inputs_embeds
+                final_attention_mask = attention_mask
+            
+            # Generate from the enhanced embeddings
+            generated_ids = self.base_model.generate(
+                inputs_embeds=final_embeds,
+                attention_mask=final_attention_mask,
+                max_new_tokens=max_new_tokens,
+                **kwargs
+            )
+            self.train()
+            return generated_ids
+
+    @torch.no_grad()
+    def apply_pending_memory_updates(self):
+        """Apply pending memory updates after backward pass"""
+        if self.pending_positions and self.pending_values:
+            for pos, val in zip(self.pending_positions, self.pending_values):
+                pos_squeezed = pos.detach().squeeze()
+                self.memory_bank[self.memory_ptr] = pos_squeezed
+                self.memory_values[self.memory_ptr] = val
+                self.memory_timestamps[self.memory_ptr] = self.total_writes
+                
+                self.memory_ptr += 1
+                if self.memory_ptr >= self.shared_memory_size:
+                    self.memory_ptr = torch.tensor(0, device=self.memory_ptr.device, dtype=torch.long)
+                self.total_writes += 1
         
-        return {
-            'loss': outputs.loss,
-            'logits': outputs.logits,
-            'avg_trajectories': num_trajectories.float().mean().item(),
-            'trajectory_length': np.mean([len(t) for t in all_thoughts])
-        }
+            self.pending_positions = []
+            self.pending_values = []
+
 
 def extract_last_number(text: str) -> Optional[float]:
     text = re.sub(r"(\d),(\d)", r"\1\2", text)
     numbers = re.findall(r"[-+]?\d*\.\d+|\d+", text)
     return float(numbers[-1]) if numbers else None
+
+def calculate_reward(model, tokenizer, item, generated_text, num_trajectories, num_steps, correctness_multiplier=1.0, traj_bonus_multiplier=0.01, step_bonus_multiplier=0.01):
+    """Calculates a custom reward based on correctness and reasoning complexity."""
+    true_answer = extract_last_number(item['answer'])
+    pred_answer = extract_last_number(generated_text)
+    
+    correctness_reward = 1.0 if (pred_answer is not None and true_answer is not None and abs(pred_answer - true_answer) < 1e-3) else 0.0
+    
+    correctness_reward = correctness_reward * correctness_multiplier
+    if correctness_reward == 0.0:
+        correctness_reward = -1.0 * correctness_multiplier
+        
+    traj_bonus = traj_bonus_multiplier * num_trajectories if correctness_reward > 0 else 0.0
+    
+    step_bonus = step_bonus_multiplier * num_steps if correctness_reward > 0 else 0.0
+    
+    final_reward = correctness_reward + traj_bonus + step_bonus
+    return final_reward
 
 def evaluate_model(model, tokenizer, val_dataset, device, debug_mode=False):
     model.eval()
@@ -536,7 +662,7 @@ def evaluate_model(model, tokenizer, val_dataset, device, debug_mode=False):
             prompt = f"Question: {item['question']}\nLet's solve this step by step.\n\nSolution:"
             inputs = tokenizer(prompt, return_tensors='pt').to(device)
             
-            generated_ids = model.base_model.generate(
+            generated_ids = model.generate(
                 inputs.input_ids,
                 attention_mask=inputs.attention_mask,
                 max_new_tokens=256,
@@ -545,7 +671,6 @@ def evaluate_model(model, tokenizer, val_dataset, device, debug_mode=False):
             )
             
             decoded_output = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
-            
             pred_answer = extract_last_number(decoded_output)
             true_answer = extract_last_number(item['answer'])
             
@@ -561,7 +686,7 @@ def test_gnn_model():
     print("-" * 50)
     
     assert extract_last_number("The answer is #### 1,234.5") == 1234.5, "Answer extraction failed"
-    print("   ✓ Answer extraction test passed")
+    print("    ✓ Answer extraction test passed")
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     dtype = torch.bfloat16
@@ -576,17 +701,17 @@ def test_gnn_model():
     try:
         action_logits, value = gnn_policy(state, memory_bank, memory_values, memory_timestamps)
         assert action_logits.shape == (1, 256) and value.shape == (1, 1)
-        print(f"   ✓ Single state test passed")
+        print(f"    ✓ Single state test passed")
     except Exception as e:
-        print(f"   ✗ Single state failed: {e}"); return False
+        print(f"    ✗ Single state failed: {e}"); traceback.print_exc(); return False
 
     state_batch = torch.randn(2, 256, device=device, dtype=dtype)
     try:
         action_logits, value = gnn_policy(state_batch, memory_bank, memory_values, memory_timestamps)
         assert action_logits.shape == (2, 256) and value.shape == (2, 1)
-        print(f"   ✓ Batched state test passed")
+        print(f"    ✓ Batched state test passed")
     except Exception as e:
-        print(f"   ✗ Batched state failed: {e}"); return False
+        print(f"    ✗ Batched state failed: {e}"); traceback.print_exc(); return False
         
     print("="*50 + "\n✓ All tests passed successfully!\n" + "="*50)
     return True
@@ -603,6 +728,11 @@ def train_gnn_coconut(debug_mode=False):
         "max_length": 256 if debug_mode else 512,
         "base_lr": 2.5e-6, "gnn_lr": 5e-6,
         "max_traj": 4, "max_steps": 4,
+        "lambda_actor": 0.1,
+        "lambda_critic": 0.1,
+        "reward_corr_mult": 1.0,
+        "reward_traj_bonus": 0.01,
+        "reward_step_bonus": 0.01
     }
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     
@@ -627,27 +757,83 @@ def train_gnn_coconut(debug_mode=False):
     metrics = defaultdict(list)
     best_val_accuracy = 0.0
     
+    print("\nStarting RL-only training...")
     for epoch in range(config['num_epochs']):
         model.train()
         dataset_size = min(len(dataset), 10 if debug_mode else 500)
         progress_bar = tqdm(range(0, dataset_size, config['batch_size']), desc=f"Epoch {epoch+1}")
         
+        optimizer.zero_grad()
+        
         for i in progress_bar:
             batch = [dataset[j] for j in range(i, min(i + config['batch_size'], dataset_size))]
-            prompts = [f"Question: {item['question']}\nLet's solve this step by step.\n\nSolution: {item['answer']}" for item in batch]
+            prompts = [f"Question: {item['question']}\nLet's solve this step by step.\n\nSolution:" for item in batch]
             inputs = tokenizer(prompts, return_tensors='pt', padding=True, truncation=True, max_length=config['max_length']).to(device)
             
-            outputs = model(**inputs, labels=inputs.input_ids)
-            loss = outputs['loss'] / config['grad_accum']
-            loss.backward()
+            outputs = model(**inputs)
+            
+            batch_rl_loss = []
+            if 'rl_trajectory_outputs' in outputs and outputs['rl_trajectory_outputs']:
+                batch_rl_outputs = outputs['rl_trajectory_outputs']
+                
+                for b_idx, (item, item_rl_outputs) in enumerate(zip(batch, batch_rl_outputs)):
+                    if not item_rl_outputs:
+                        continue
+                    
+                    # Generate the full decoded answer for reward calculation
+                    generated_ids = model.generate(
+                        inputs.input_ids[b_idx:b_idx+1],
+                        attention_mask=inputs.attention_mask[b_idx:b_idx+1],
+                        max_new_tokens=256,
+                        num_beams=1,
+                        pad_token_id=tokenizer.eos_token_id
+                    )
+                    decoded_output = tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+                    
+                    num_trajectories_for_item = outputs['num_trajectories_per_item'][b_idx]
+                    num_steps_for_item = outputs['num_steps_per_item'][b_idx]
+                    
+                    reward = calculate_reward(
+                        model, tokenizer, item, decoded_output,
+                        num_trajectories_for_item, num_steps_for_item,
+                        correctness_multiplier=config['reward_corr_mult'],
+                        traj_bonus_multiplier=config['reward_traj_bonus'],
+                        step_bonus_multiplier=config['reward_step_bonus']
+                    )
+                    reward = torch.tensor(reward, device=device, dtype=torch.bfloat16)
+
+                    all_values = torch.stack([out['value'] for out in item_rl_outputs]).squeeze()
+                    all_log_probs = torch.stack([out['log_prob'] for out in item_rl_outputs])
+
+                    value_loss = F.mse_loss(all_values, reward.expand_as(all_values))
+                    advantages = (reward - all_values).detach()
+                    policy_loss = (-all_log_probs * advantages).mean()
+                    
+                    item_loss_rl = config['lambda_actor'] * policy_loss + config['lambda_critic'] * value_loss
+                    batch_rl_loss.append(item_loss_rl)
+
+            loss_rl = torch.mean(torch.stack(batch_rl_loss)) if batch_rl_loss else torch.tensor(0.0, device=device)
+            total_loss = loss_rl
+            
+            if not torch.isfinite(total_loss):
+                print(f"Warning: Non-finite loss detected: {total_loss.item()}. Skipping update.")
+                optimizer.zero_grad()
+                continue
+
+            loss_to_backward = total_loss / config['grad_accum']
+            loss_to_backward.backward()
+            
+            model.apply_pending_memory_updates()
             
             if (i // config['batch_size'] + 1) % config['grad_accum'] == 0:
                 grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                metrics['grad_norms'].append(grad_norm.item())
+                if torch.isfinite(grad_norm):
+                    metrics['grad_norms'].append(grad_norm.item())
                 optimizer.step()
                 optimizer.zero_grad()
             
-            metrics['train_loss'].append(loss.item() * config['grad_accum'])
+            metrics['train_loss'].append(total_loss.item())
+            metrics['rl_loss'].append(loss_rl.item())
             progress_bar.set_postfix(loss=np.mean(metrics['train_loss'][-50:]))
 
         val_accuracy = evaluate_model(model, tokenizer, val_dataset, device, debug_mode)
@@ -657,7 +843,6 @@ def train_gnn_coconut(debug_mode=False):
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
             print("New best validation accuracy! Saving model...")
-            # Move the model's state_dict to CPU before saving
             cpu_state_dict = {key: value.cpu() for key, value in model.state_dict().items()}
             torch.save(cpu_state_dict, 'best_gnn_coconut_model.pt')
 
@@ -668,5 +853,6 @@ if __name__ == "__main__":
     model, metrics = train_gnn_coconut(debug_mode=debug)
     if model:
         with open('training_metrics_gnn.json', 'w') as f:
-            json.dump({k: v for k, v in metrics.items()}, f, indent=2)
+            serializable_metrics = {k: [i.item() if isinstance(i, torch.Tensor) else i for i in v] for k, v in metrics.items()}
+            json.dump(serializable_metrics, f, indent=2)
         print("Training complete! Metrics saved to training_metrics_gnn.json")
