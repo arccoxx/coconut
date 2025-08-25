@@ -52,6 +52,6 @@ login()
 3. Running the Training
 The script is designed to be run directly. It will automatically download the necessary models and datasets, run a comprehensive suite of unit tests, and then begin the training process.
 
-python your_script_name.py
+python current_model_teacher_forcing.py
 
 You can configure the training parameters, such as the number of epochs and batch size, in the train() function at the bottom of the script.
