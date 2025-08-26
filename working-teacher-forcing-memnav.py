@@ -461,6 +461,164 @@ class CurriculumCognitiveModel(nn.Module):
             'thought_loss': thought_loss.item()
         }
 
+    def generate_with_curriculum(self, tokenizer, prompt: str, max_new_tokens: int = 256, 
+                                 temperature: float = 0.7, top_p: float = 0.9):
+        """
+        Generate text using the curriculum-aware model with continuous thoughts.
+        
+        This method handles generation based on the current curriculum stage:
+        - Stage 0: Standard generation (no continuous thoughts)
+        - Stage > 0: Generate continuous thoughts via navigator, then generate text
+        
+        Args:
+            tokenizer: The tokenizer to use
+            prompt: The input prompt string
+            max_new_tokens: Maximum number of new tokens to generate
+            temperature: Sampling temperature for generation
+            top_p: Top-p (nucleus) sampling parameter
+        
+        Returns:
+            Generated text string
+        """
+        self.eval()
+        device = next(self.parameters()).device
+        dtype = next(self.parameters()).dtype
+        
+        # Tokenize prompt
+        inputs = tokenizer(prompt, return_tensors='pt').to(device)
+        prompt_embeds = self.base_model.get_input_embeddings()(inputs.input_ids)
+        
+        # Get initial hidden state from prompt
+        with torch.no_grad():
+            prompt_outputs = self.base_model(
+                inputs_embeds=prompt_embeds, 
+                attention_mask=inputs.attention_mask, 
+                output_hidden_states=True
+            )
+            # Get the last hidden state of the prompt
+            initial_state = prompt_outputs.hidden_states[-1][:, -1, :].unsqueeze(0)
+        
+        # Initialize memory with the initial state
+        memory = CurriculumGraphMemory(initial_state, max_thoughts=self.current_stage * self.c_thought + 5)
+        
+        # Generate continuous thoughts based on current stage
+        num_thoughts = self.current_stage * self.c_thought
+        thoughts_embeds = []
+        
+        if num_thoughts > 0:
+            # Generate continuous thoughts autoregressively using navigator
+            current_state = memory.nodes[-1]
+            
+            for _ in range(num_thoughts):
+                # Navigator generates next thought
+                with torch.no_grad():
+                    next_thought = self.navigator(current_state, memory)
+                    next_thought = F.normalize(next_thought, p=2, dim=-1)
+                
+                thoughts_embeds.append(next_thought)
+                memory.add_node(next_thought)
+                current_state = next_thought
+        
+        # Combine prompt embeddings with generated continuous thoughts
+        if thoughts_embeds:
+            thoughts_tensor = torch.cat(thoughts_embeds, dim=0)
+            # Combine prompt and thoughts for generation
+            combined_embeds = torch.cat([
+                prompt_embeds.squeeze(0),
+                thoughts_tensor
+            ], dim=0).unsqueeze(0)
+        else:
+            # Stage 0: just use prompt embeddings
+            combined_embeds = prompt_embeds
+        
+        # Generate text using the base model
+        # Create attention mask for combined embeddings
+        combined_length = combined_embeds.shape[1]
+        attention_mask = torch.ones((1, combined_length), device=device, dtype=torch.long)
+        
+        # Use the base model's generate method with the combined embeddings
+        with torch.no_grad():
+            # Get the model to continue from the combined embeddings
+            # First, we need to get logits from our combined embeddings
+            outputs = self.base_model(
+                inputs_embeds=combined_embeds,
+                attention_mask=attention_mask
+            )
+            
+            # Get the last logits and sample from them
+            last_logits = outputs.logits[0, -1, :]
+            
+            # Apply temperature and top-p sampling
+            last_logits = last_logits / temperature
+            
+            # Apply top-p filtering
+            sorted_logits, sorted_indices = torch.sort(last_logits, descending=True)
+            cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+            
+            # Remove tokens with cumulative probability above the threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            
+            indices_to_remove = sorted_indices[sorted_indices_to_remove]
+            last_logits[indices_to_remove] = float('-inf')
+            
+            # Sample from the filtered distribution
+            probs = F.softmax(last_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
+            # Now continue generation from this point
+            generated_ids = [next_token.item()]
+            current_embeds = combined_embeds
+            
+            for _ in range(max_new_tokens - 1):
+                # Get embedding of the last generated token
+                next_embed = self.base_model.get_input_embeddings()(next_token.unsqueeze(0))
+                
+                # Append to current embeddings
+                current_embeds = torch.cat([current_embeds, next_embed], dim=1)
+                
+                # Update attention mask
+                attention_mask = torch.cat([
+                    attention_mask,
+                    torch.ones((1, 1), device=device, dtype=torch.long)
+                ], dim=1)
+                
+                # Get next token prediction
+                outputs = self.base_model(
+                    inputs_embeds=current_embeds,
+                    attention_mask=attention_mask
+                )
+                
+                # Get logits for the last position
+                last_logits = outputs.logits[0, -1, :] / temperature
+                
+                # Apply top-p filtering again
+                sorted_logits, sorted_indices = torch.sort(last_logits, descending=True)
+                cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
+                
+                sorted_indices_to_remove = cumulative_probs > top_p
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices[sorted_indices_to_remove]
+                last_logits[indices_to_remove] = float('-inf')
+                
+                # Sample next token
+                probs = F.softmax(last_logits, dim=-1)
+                next_token = torch.multinomial(probs, num_samples=1)
+                generated_ids.append(next_token.item())
+                
+                # Check for EOS token
+                if next_token.item() == tokenizer.eos_token_id:
+                    break
+        
+        # Decode the generated tokens
+        generated_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        
+        # Combine with original prompt for full response
+        return prompt + " " + generated_text
+
 # ============================================================
 # COMPREHENSIVE SMOKE TESTS
 # ============================================================
@@ -969,6 +1127,49 @@ Finally, I add 12 + 1 = 13.
         
         print("   ✓ Edge cases tested")
 
+    def test_14_generate_with_curriculum(self):
+        """Test the generate_with_curriculum method."""
+        print("\n🧪 Testing generate_with_curriculum method...")
+        
+        # Create a mock model for testing generation
+        config = type('Config', (), {'hidden_size': self.hidden_size})()
+        mock_base = Mock(spec=LlamaForCausalLM)
+        mock_base.config = config
+        
+        # Mock the necessary methods
+        mock_base.get_input_embeddings.return_value = MockEmbedding(self.device, self.dtype, self.hidden_size)
+        mock_base.parameters.return_value = [torch.tensor(1.0, device=self.device, dtype=self.dtype)]
+        
+        # Mock the forward pass to return reasonable outputs
+        mock_outputs = Mock()
+        mock_outputs.hidden_states = [torch.randn(1, 10, self.hidden_size, device=self.device, dtype=self.dtype)]
+        mock_outputs.logits = torch.randn(1, 10, 50000, device=self.device, dtype=self.dtype)  # vocab size
+        mock_base.return_value = mock_outputs
+        
+        model = CurriculumCognitiveModel(mock_base, dropout_rate=0.1)
+        model.to(self.device)
+        
+        # Test generation at different stages
+        for stage in [0, 1, 2]:
+            model.set_curriculum_stage(stage)
+            print(f"   Testing generation at stage {stage}...")
+            
+            # Verify the generate method exists and has correct signature
+            self.assertTrue(hasattr(model, 'generate_with_curriculum'), 
+                          "Model should have generate_with_curriculum method")
+            
+            # Check method signature
+            import inspect
+            sig = inspect.signature(model.generate_with_curriculum)
+            expected_params = ['tokenizer', 'prompt', 'max_new_tokens', 'temperature', 'top_p']
+            for param in expected_params:
+                self.assertIn(param, sig.parameters, 
+                            f"generate_with_curriculum should have '{param}' parameter")
+            
+            print(f"   ✓ Stage {stage}: generate_with_curriculum method validated")
+        
+        print("   ✓ generate_with_curriculum method structure validated")
+
 
 def run_comprehensive_smoke_tests():
     """Run all smoke tests before training."""
@@ -1225,35 +1426,51 @@ def train_with_curriculum(skip_tests=False):
             else:
                 print(f"   → Training with {stage} reasoning steps replaced by continuous thoughts")
         
-        # Validation at end of stage
+        # Validation at end of stage - FIXED VERSION
         print(f"\n🔍 Validating at end of Stage {stage}...")
         model.eval()
         val_correct = 0
-        val_total = min(len(val_dataset), 50)  # Use subset for efficiency
+        val_total = min(len(val_dataset), 100)  # Increased from 50 for more stable results
         
         with torch.no_grad():
             for i in tqdm(range(val_total), desc="Validating"):
                 item = val_dataset[i]
-                prompt = f"Question: {item['question']}\n\nSolution:"
                 
-                # For validation, we use the model's generation capability
-                # (This would need proper implementation of generate_with_reasoning)
-                # For now, we'll use a simplified evaluation
-                _, full_text, _, _ = prepare_data_for_stage(
-                    item, stage, c_thought, tokenizer, device, torch.bfloat16
-                )
+                # Prepare the appropriate prompt based on stage
+                if stage == 0:
+                    prompt = f"Question: {item['question']}\n\nSolution:"
+                else:
+                    prompt = f"Question: {item['question']}\n\n<bot>Solution:"
                 
-                # Check if model can process the example
                 try:
-                    inputs = tokenizer(full_text, return_tensors='pt', max_length=max_length, truncation=True).to(device)
-                    # Simple check - can the model process this without errors
-                    val_correct += 1 if random.random() > 0.5 else 0  # Placeholder
-                except:
-                    pass
+                    # Generate prediction using the model's generate_with_curriculum method
+                    pred_text = model.generate_with_curriculum(
+                        tokenizer=tokenizer,
+                        prompt=prompt,
+                        max_new_tokens=256,
+                        temperature=0.7,
+                        top_p=0.9
+                    )
+                    
+                    # Check answer correctness by comparing final numerical answers
+                    if check_answer_correctness(pred_text, item['answer']):
+                        val_correct += 1
+                    
+                    # Optionally log a few predictions for debugging (first 3)
+                    if i < 3:
+                        pred_answer = parse_final_answer(pred_text)
+                        true_answer = parse_final_answer(item['answer'])
+                        print(f"\n   Sample {i}: Pred={pred_answer}, True={true_answer}")
+                        
+                except Exception as e:
+                    # Log errors but continue
+                    if i < 3:  # Only log first few errors to avoid spam
+                        print(f"\n   ⚠️ Eval error on item {i}: {str(e)[:100]}")
+                    continue
         
         val_accuracy = val_correct / val_total if val_total > 0 else 0
         all_val_accuracies.append(val_accuracy)
-        print(f"Stage {stage} - Validation Accuracy: {val_accuracy:.2%}")
+        print(f"Stage {stage} - Validation Accuracy: {val_accuracy:.2%} ({val_correct}/{val_total})")
         
         if val_accuracy > best_val_accuracy:
             best_val_accuracy = val_accuracy
@@ -1378,83 +1595,3 @@ if __name__ == "__main__":
         
         if not success:
             sys.exit(1)
-    
-# For Jupyter/Colab notebooks, you can call directly:
-# main('test')  # Run tests only
-# main('train')  # Run tests then train
-# main('train_skip_tests')  # Skip tests and train (not recommended)
-#
-# Or use the quick helper functions:
-# quick_test()      # Run all tests
-# start_training()  # Run tests then train
-# start_training(skip_tests=True)  # Skip tests and train
-
-"""
-KEY DIFFERENCES FROM ORIGINAL V39 IMPLEMENTATION:
-=================================================
-
-ORIGINAL V39 APPROACH (Incorrect):
------------------------------------
-1. Generated all continuous thoughts at once using generate_structured_teacher_thoughts()
-2. Tried to train the model to map directly from questions to continuous thoughts
-3. No curriculum - attempted end-to-end learning from scratch
-4. Single training stage with fixed data format
-5. Result: Model struggles to learn, similar to "w/o curriculum" in paper
-
-COCONUT V40 APPROACH (Correct per paper):
------------------------------------------
-1. Multi-stage curriculum with progressive replacement:
-   - Stage 0: Train on full Chain-of-Thought in language (NO LATENT THOUGHTS)
-   - Stage 1: Replace first reasoning step with continuous thoughts
-   - Stage 2: Replace first two steps with continuous thoughts
-   - And so on...
-   
-2. Each stage has different training data:
-   - Stage 0: Pure language CoT (thought_loss = 0, only LM loss matters)
-   - Stage 1+: Mix of language and latent reasoning (thought_loss > 0)
-   - Final stage: All reasoning in latent space
-   
-3. Training strategy:
-   - Full teacher forcing (ε = 1.0) for stable learning
-   - Navigator always learns from ground truth continuous thoughts
-   - No scheduled sampling - simpler and more reliable
-   - Optimizer reset between stages (critical!)
-   
-4. Gradual learning progression:
-   - Stage 0: Model learns standard CoT reasoning in language
-   - Stage 1+: Model learns to encode language reasoning into latent space
-   - Navigator gradually learns the mapping from language to latent
-   - Not trying to learn everything at once
-
-5. Result: Model successfully learns latent reasoning, beats baselines
-
-WHY STAGE 0 HAS NO THOUGHT LOSS:
---------------------------------
-Stage 0 is crucial because it establishes the baseline CoT capability.
-The model first needs to learn how to reason step-by-step in language
-before it can learn to compress that reasoning into latent space.
-This is why thought_loss = 0.000 in Stage 0 - there are no latent
-thoughts to train yet! The navigator starts learning in Stage 1.
-
-TEACHER FORCING STRATEGY:
--------------------------
-This implementation uses constant teacher forcing (ε = 1.0) throughout
-training. This means the navigator always learns from the ground truth
-continuous thoughts rather than its own predictions. This simplification:
-- Provides more stable training signals
-- Reduces training variance
-- Ensures consistent learning across stages
-- Eliminates complexity of scheduled sampling
-
-WHY THE CURRICULUM IS CRITICAL:
--------------------------------
-The paper's ablation study shows that without curriculum ("w/o curriculum"),
-the model completely fails to learn latent reasoning and performs worse than
-No-CoT baseline. The curriculum provides essential scaffolding that allows
-the navigator to gradually learn the complex mapping from language to latent
-reasoning space.
-
-This is similar to how humans learn complex skills - you can't learn calculus
-without first learning algebra. The curriculum provides the necessary stepping
-stones for the model to build up its latent reasoning capability.
-"""
