@@ -2,8 +2,8 @@
 COCONUT Training v42.1 - Three-Phase Curriculum Learning (Corrected)
 ===================================================================
 This version implements a structured, three-phase training regimen and fixes
-critical bugs from the previous version, most notably the incorrect output
-slicing during validation that caused 0% accuracy and failing smoke tests.
+critical bugs from the previous version. The training order has been logically
+rearranged to calibrate the navigator on the fine-tuned model.
 
 Key Changes from v42.1 (Original):
 - **Corrected Reasoning Extraction**: The `extract_reasoning_steps` function
@@ -13,14 +13,13 @@ Key Changes from v42.1 (Original):
   unreliable slicing of the output. The new logic assumes `generate` with
   `inputs_embeds` returns only new tokens and reconstructs the full response,
   preventing validation failures.
-- **Reordered Training Strategy**: The training phases have been reordered to
-  calibrate the navigator on the base model before joint fine-tuning.
-  1. Phase 1 (Navigator Warm-up): Freezes the base LLM and trains only the
-     navigator on CoT hidden states.
-  2. Phase 2 (Joint CoT Fine-tuning): Unfreezes the LLM adapters and fine-tunes
-     both components together on standard CoT data (Stage 0).
+- **Reordered Training Strategy**: The training phases have been reordered for
+  better performance:
+  1. Phase 1 (Joint CoT Fine-tuning): Fine-tunes the LLM on standard CoT data.
+  2. Phase 2 (Navigator Warm-up): Freezes the fine-tuned LLM and calibrates
+     the navigator on its hidden states.
   3. Phase 3 (Latent Curriculum): Proceeds with the multi-stage COCONUT
-     curriculum.
+     curriculum using the calibrated components.
 - **Heavy Regularization**: Increased dropout in the navigator and added weight
   decay to its optimizer to prevent overfitting.
 - **Bug Fixes**: Corrected multiple minor bugs related to environment variables,
@@ -253,7 +252,7 @@ class CurriculumCognitiveModel(nn.Module):
         
         self.current_stage = 0
         self.c_thought = 2
-        self.thought_loss_fct = nn.MSELoss() # Using MSELoss as suggested
+        self.thought_loss_fct = nn.MSELoss() # Using MSELoss as requested
 
     def set_curriculum_stage(self, stage: int):
         self.current_stage = stage
@@ -460,10 +459,10 @@ def run_navigator_validation(model, val_dataset, tokenizer, subset_size=50):
 
 
 def run_navigator_warm_up(model, train_dataset, val_dataset, tokenizer, epochs, patience, lr, subset_size):
-    """Phase 1: Train only the navigator on CoT states with early stopping."""
-    print("\n" + "="*50 + "\n🛡️ PHASE 1: Navigator Warm-up\n" + "="*50)
+    """Trains only the navigator on CoT states with early stopping."""
 
     # Freeze base LLM, ensure navigator is trainable
+    print("\nFreezing base LLM for navigator-only training...")
     for param in model.base_model.parameters(): param.requires_grad = False
     for param in model.navigator.parameters(): param.requires_grad = True
 
@@ -576,23 +575,16 @@ def train_with_curriculum(skip_tests=False):
     all_val_accuracies = []
     stage_boundaries = []
 
-    # --- PHASE 1: NAVIGATOR WARM-UP ---
-    print("\n" + "="*50 + "\n🛡️ PHASE 1: Navigator Warm-up\n" + "="*50)
-    run_navigator_warm_up(
-        model, train_dataset, val_dataset, tokenizer,
-        epochs=config['warm_up_epochs'], patience=config['warm_up_patience'],
-        lr=config['warm_up_lr'], subset_size=200)
-
-    # --- Unfreeze base model for subsequent phases ---
-    print("\nUnfreezing LLM adapters for joint training...")
-    for param in model.base_model.parameters():
+    # --- PHASE 1: JOINT CoT FINE-TUNING (STAGE 0) ---
+    print("\n" + "="*50 + "\n📚 PHASE 1: Joint CoT Fine-tuning\n" + "="*50)
+    stage_boundaries.append(len(all_train_losses))
+    
+    # Unfreeze all trainable parameters for joint fine-tuning
+    print("\nUnfreezing LLM adapters and navigator for joint training...")
+    for param in model.parameters():
         if param.dtype.is_floating_point:
             param.requires_grad = True
 
-    # --- PHASE 2: JOINT CoT FINE-TUNING (STAGE 0) ---
-    print("\n" + "="*50 + "\n📚 PHASE 2: Joint CoT Fine-tuning\n" + "="*50)
-    stage_boundaries.append(len(all_train_losses))
-    
     stage = 0
     model.set_curriculum_stage(stage)
     epochs = config['cot_epochs']
@@ -634,8 +626,8 @@ def train_with_curriculum(skip_tests=False):
                 gc.collect(); torch.cuda.empty_cache()
                 optimizer.zero_grad()
 
-    # --- Validation for Phase 2 ---
-    print(f"\n🔍 Validating at end of Phase 2 (CoT Fine-tuning)...")
+    # --- Validation for Phase 1 ---
+    print(f"\n🔍 Validating at end of Phase 1 (CoT Fine-tuning)...")
     model.eval()
     val_correct, val_total = 0, min(len(val_dataset), 50)
     with torch.no_grad():
@@ -651,7 +643,21 @@ def train_with_curriculum(skip_tests=False):
                 continue
     val_accuracy = val_correct / val_total if val_total > 0 else 0
     all_val_accuracies.append(val_accuracy)
-    print(f"Phase 2 - Validation Accuracy: {val_accuracy:.2%} ({val_correct}/{val_total})")
+    print(f"Phase 1 - Validation Accuracy: {val_accuracy:.2%} ({val_correct}/{val_total})")
+
+
+    # --- PHASE 2: NAVIGATOR WARM-UP ---
+    print("\n" + "="*50 + "\n🛡️ PHASE 2: Navigator Warm-up (on fine-tuned model)\n" + "="*50)
+    run_navigator_warm_up(
+        model, train_dataset, val_dataset, tokenizer,
+        epochs=config['warm_up_epochs'], patience=config['warm_up_patience'],
+        lr=config['warm_up_lr'], subset_size=200)
+
+    # --- Unfreeze base model again for Phase 3 ---
+    print("\nRe-unfreezing LLM adapters for Latent Curriculum...")
+    for param in model.base_model.parameters():
+        if param.dtype.is_floating_point:
+            param.requires_grad = True
 
     # --- PHASE 3: LATENT CURRICULUM (STAGES 1..N) ---
     print("\n" + "="*50 + "\n🧠 PHASE 3: Latent Curriculum Training\n" + "="*50)
@@ -782,4 +788,5 @@ if __name__ == "__main__":
     print("Running in interactive mode. Call main('test') or main('train').")
     # Example to run training:
     # main('train')
+    main()
 
